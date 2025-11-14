@@ -1,0 +1,36 @@
+# Compiled class file
+*.class
+
+# Log file
+*.log
+
+# BlueJ files
+*.ctxt
+
+# Package files
+*.jar
+*.war
+*.nar
+*.ear
+*.tar.gz
+*.rar
+
+# IDE files
+.project
+.classpath
+.settings
+/.settings
+.metadata
+/.metadata
+.recommenders
+*.releaseBackup
+release.properties
+.idea
+/.idea
+*.iml
+*.class
+*.ipr
+*.iws
+
+# MacOS files
+.DS_Store
