@@ -8,6 +8,7 @@ import akka.actor.typed.javadsl.ActorContext;
 import akka.actor.typed.javadsl.Behaviors;
 import akka.actor.typed.javadsl.Receive;
 import de.ddm.actors.patterns.Reaper;
+import de.ddm.actors.profiling.DataProvider;
 import de.ddm.actors.profiling.DependencyWorker;
 import de.ddm.serialization.AkkaSerializable;
 import de.ddm.singletons.SystemConfigurationSingleton;
@@ -41,6 +42,13 @@ public class Worker extends AbstractBehavior<Worker.Message> {
 		super(context);
 		Reaper.watchWithDefaultReaper(this.getContext().getSelf());
 
+		// Spawn DataProvider BEFORE DependencyWorker to ensure it's available
+		// It registers itself with Receptionist for service discovery
+		this.dataProvider = context.spawn(
+				DataProvider.create(),
+				DataProvider.DEFAULT_NAME);
+		context.getLog().info("DataProvider spawned");
+
 		final int numWorkers = SystemConfigurationSingleton.get().getNumWorkers();
 		if (numWorkers > 0)
 			this.dependencyWorker = context.spawn(
@@ -53,6 +61,7 @@ public class Worker extends AbstractBehavior<Worker.Message> {
 	// Actor State //
 	/////////////////
 
+	private ActorRef<DataProvider.Message> dataProvider;
 	private ActorRef<DependencyWorker.Message> dependencyWorker;
 
 	////////////////////
@@ -67,9 +76,12 @@ public class Worker extends AbstractBehavior<Worker.Message> {
 	}
 
 	private Behavior<Message> handle(ShutdownMessage message) {
-		// If we expect the system to still be active when the a ShutdownMessage is issued,
-		// we should propagate this ShutdownMessage to all active child actors so that they
-		// can end their protocols in a clean way. Simply stopping this actor also stops all
+		// If we expect the system to still be active when the a ShutdownMessage is
+		// issued,
+		// we should propagate this ShutdownMessage to all active child actors so that
+		// they
+		// can end their protocols in a clean way. Simply stopping this actor also stops
+		// all
 		// child actors, but in a hard way!
 		return Behaviors.stopped();
 	}
