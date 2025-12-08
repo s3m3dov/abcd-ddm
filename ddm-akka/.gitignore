@@ -16,6 +16,7 @@
 *.rar
 
 # Directories
+.docs/
 bin/
 target/
 data/
