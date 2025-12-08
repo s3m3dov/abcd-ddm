@@ -19,6 +19,7 @@
 bin/
 target/
 data/
+results/
 src/main/java/de/ddm/tutorial/
 
 # IDE files
