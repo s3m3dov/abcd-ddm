@@ -76,22 +76,27 @@ The `-es true` flag is for demo purposes only. Press `enter` to terminate. A wor
 **Distributed Run (Locally on One Machine)**
 
 ```bash
-# Terminal 1: Run master
+# Terminal 1: Master
 java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar master -w 0
-
-# Terminal 2+: Run workers (repeat in different terminals)
+# Terminal 2: Worker 1 (uses default port 7879)
 java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar worker -w 1
-java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar worker -w 2
+# Terminal 3: Worker 2 (must specify different port)
+java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar worker -w 1 -p 7880
+# Terminal 4: Worker 3 (another different port)
+java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar worker -w 1 -p 7881
 ```
 
 **Distributed Run (Multiple Machines)**
 
 ```bash
-# On master machine:
-java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar master -w 0 -h <your-ip-address>
+# Machine 1 (Master)
+java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar master -w 0 -h <machine1-ip>
 
-# On worker machines:
-java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar worker -w 1 -mh <master-host-ip> -h <your-ip-address>
+# Machine 2 (Worker)
+java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar worker -w 1 -mh <machine1-ip> -h <machine2-ip>
+
+# Machine 3 (Worker)
+java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar worker -w 1 -mh <machine1-ip> -h <machine3-ip>
 ```
 
 > Note: Memory limits (`-Xms2048m -Xmx2048m`) ensure compatibility with Pi cluster constraints. Replace `<your-ip-address>` and `<master-host-ip>` with actual IP addresses.
