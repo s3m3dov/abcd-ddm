@@ -114,18 +114,16 @@ public class Guardian extends AbstractBehavior<Guardian.Message> {
 	}
 
 	private Behavior<Message> handle(ShutdownMessage message) {
-		ActorRef<Message> self = this.getContext().getSelf();
-
-		if ((message.getInitiator() != null) || this.isClusterDown()) {
-			this.shutdown();
-		} else {
-			for (ActorRef<Message> userGuardian : this.userGuardians)
-				if (!userGuardian.equals(self))
-					userGuardian.tell(new ShutdownMessage(self));
-
-			if (!this.timer.isTimerActive("ShutdownReattempt"))
-				this.timer.startTimerAtFixedRate("ShutdownReattempt", message, Duration.ofSeconds(5), Duration.ofSeconds(5));
-		}
+        ActorRef<Message> self = this.getContext().getSelf();
+        if ((message.getInitiator() != null) || this.isClusterDown()) {
+            this.shutdown();
+        } else {
+            for (ActorRef<Message> userGuardian : this.userGuardians)
+                if (!userGuardian.equals(self))
+                    userGuardian.tell(new ShutdownMessage(self));
+            if (!this.timer.isTimerActive("ShutdownReattempt"))
+                this.timer.startTimerAtFixedRate("ShutdownReattempt", message, Duration.ofSeconds(5), Duration.ofSeconds(5));
+        }
 		return this;
 	}
 

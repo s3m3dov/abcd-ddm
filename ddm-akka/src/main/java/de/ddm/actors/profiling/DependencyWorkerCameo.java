@@ -7,6 +7,7 @@ import akka.actor.typed.javadsl.ActorContext;
 import akka.actor.typed.javadsl.Behaviors;
 import akka.actor.typed.javadsl.Receive;
 import de.ddm.serialization.AkkaSerializable;
+import de.ddm.utils.LoggingInterceptor;
 import it.unimi.dsi.fastutil.ints.*;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -40,7 +41,8 @@ public class DependencyWorkerCameo extends AbstractBehavior<DependencyWorkerCame
 
     public static Behavior<Message> create(ActorRef<DependencyMiner.Message> dependencyMiner, int numHelpers,
             int workerId) {
-        return Behaviors.setup(context -> new DependencyWorkerCameo(context, dependencyMiner, numHelpers, workerId));
+        return LoggingInterceptor.wrap(
+                Behaviors.setup(context -> new DependencyWorkerCameo(context, dependencyMiner, numHelpers, workerId)));
     }
 
     private DependencyWorkerCameo(ActorContext<Message> context, ActorRef<DependencyMiner.Message> dependencyMiner,
@@ -77,6 +79,7 @@ public class DependencyWorkerCameo extends AbstractBehavior<DependencyWorkerCame
     }
 
     private Behavior<Message> handle(ResultMessage message) {
+
         // Accumulate results from helpers
         for (int lhs : message.getLhss())
             this.lhss.add(lhs);
