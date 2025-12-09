@@ -20,6 +20,6 @@
     </root>
 
     <!-- Specific loggers to different levels -->
-    <logger name="akka" level="DEBUG"/>
+    <logger name="akka" level="INFO"/>
     <logger name="de.ddm" level="DEBUG"/>
 </configuration>
