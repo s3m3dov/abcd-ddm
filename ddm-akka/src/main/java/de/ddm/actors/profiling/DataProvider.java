@@ -99,14 +99,14 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     /**
-     * Message to register which attributes this DataProvider will manage
+     * Welcome Message from DependencyMiner to set up the DataProvider with its ID and managed attributes
      */
     @Getter
     @NoArgsConstructor
     @AllArgsConstructor
-    public static class AssignAttributesMessage implements Message {
+    public static class SetIdAndAttributesMessage implements Message {
         private static final long serialVersionUID = -9234567890123456L;
-        int workerId;
+        int dataProviderId;
         int[] attributes;
     }
 
@@ -137,8 +137,8 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 LargeMessageProxy.create(context.getSelf().unsafeUpcast(), false),
                 LargeMessageProxy.DEFAULT_NAME);
 
-        // workerId will be set when we receive the first message or during registration
-        this.workerId = -1;
+        // dataProviderId will be set when we receive the first message or during registration
+        this.dataProviderId = -1;
 
         // dependencyMiner will be discovered via Receptionist
         this.dependencyMiner = null;
@@ -174,7 +174,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     // Actor references
     private ActorRef<LargeMessageProxy.Message> largeMessageProxy;
     private ActorRef<DependencyMiner.Message> dependencyMiner;
-    private int workerId;
+    private int dataProviderId;
 
     ////////////////////
     // Actor Behavior //
@@ -184,7 +184,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     public Receive<Message> createReceive() {
         return newReceiveBuilder()
                 .onMessage(ReceptionistListingMessage.class, this::handle)
-                .onMessage(AssignAttributesMessage.class, this::handle)
+                .onMessage(SetIdAndAttributesMessage.class, this::handle)
                 .onMessage(DataMessage.class, this::handle)
                 .onMessage(MoveDataMessage.class, this::handle)
                 .onMessage(AcceptDataMessage.class, this::handle)
@@ -207,14 +207,14 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         return this;
     }
 
-    private Behavior<Message> handle(AssignAttributesMessage message) {
+    private Behavior<Message> handle(SetIdAndAttributesMessage message) {
         // Initialize columns for the attributes we'll manage
-        this.workerId = message.getWorkerId();
+        this.dataProviderId = message.getDataProviderId();
         for (int attribute : message.getAttributes()) {
             this.columns.put(attribute, new HashSet<>());
         }
         this.getContext().getLog().info("DataProvider registered {} attributes for worker {}",
-                message.getAttributes().length, this.workerId);
+                message.getAttributes().length, this.dataProviderId);
         return this;
     }
 
@@ -271,7 +271,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     private Behavior<Message> handle(AcceptDataMessage message) {
 
         // Initialize this worker's ID
-        this.workerId = message.getSourceDataProviderId();
+        this.dataProviderId = message.getSourceDataProviderId();
 
         // Accept the columns
         for (Map.Entry<Integer, Set<String>> entry : message.getColumns().entrySet()) {
@@ -317,7 +317,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         boolean overloaded = this.availableMemory < this.usedMemoryPredicted;
 
         // Answer with status
-        this.dependencyMiner.tell(new DependencyMiner.StatusMessage(this.workerId, false, overloaded));
+        this.dependencyMiner.tell(new DependencyMiner.StatusMessage(this.dataProviderId, false, overloaded));
 
         this.getContext().getLog().info("Status: overloaded = {} ({} / {})", overloaded,
                 this.availableMemory / 1024 / 1024, this.usedMemoryPredicted / 1024 / 1024);
