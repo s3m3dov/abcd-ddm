@@ -62,7 +62,7 @@ public class DataProviderTest {
 
         // Register attributes for worker
         int[] attributes = { 1, 2, 3, 4, 5 };
-        dataProvider.tell(new DataProvider.RegisterAttributesMessage(1, attributes));
+        dataProvider.tell(new DataProvider.AssignAttributesMessage(1, attributes));
 
         // Query attribute owner
         TestProbe<DataProvider.ResponseAttributeOwnerMessage> probe = testKit.createTestProbe();
