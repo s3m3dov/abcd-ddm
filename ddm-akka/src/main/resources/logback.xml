@@ -1,13 +1,25 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <configuration>
+    <!-- Console appender with colorized output -->
     <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
-            <pattern>[%d{HH:mm:ss.SSS} %-5level] %50.50X{akkaSource:-local}| %msg%n</pattern>
+            <!-- Colorized pattern with:
+                 - %highlight for log level colors (ERROR=red, WARN=yellow, INFO=blue, DEBUG=cyan, TRACE=white)
+                 - %cyan for logger name
+                 - %magenta for thread name
+                 - Akka source information preserved
+            -->
+            <pattern>%d{HH:mm:ss.SSS} %highlight(%-5level) [%magenta(%thread)] %cyan(%-40.40logger{36}) %50.50X{akkaSource:-local} - %msg%n</pattern>
         </encoder>
     </appender>
 
+    <!-- Root logger level - change to DEBUG for more verbose output -->
     <root level="INFO">
         <appender-ref ref="STDOUT"/>
     </root>
+
+    <!-- Specific loggers to different levels -->
+    <logger name="akka" level="DEBUG"/>
+    <logger name="de.ddm" level="DEBUG"/>
 </configuration>
