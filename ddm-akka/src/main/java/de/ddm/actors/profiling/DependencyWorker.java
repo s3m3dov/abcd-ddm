@@ -40,15 +40,6 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	@Getter
 	@NoArgsConstructor
 	@AllArgsConstructor
-	public static class InitialAttributesMessage implements Message {
-		private static final long serialVersionUID = -7816276125448176767L;
-		int[] attributes;
-		int workerId;
-	}
-
-	@Getter
-	@NoArgsConstructor
-	@AllArgsConstructor
 	public static class DataMessage implements Message {
 		private static final long serialVersionUID = 8586787707165511461L;
 		int attribute;
@@ -169,7 +160,6 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	public Receive<Message> createReceive() {
 		return newReceiveBuilder()
 				.onMessage(ReceptionistListingMessage.class, this::handle)
-				.onMessage(InitialAttributesMessage.class, this::handle)
 				.onMessage(DataMessage.class, this::handle)
 				.onMessage(MoveDataMessage.class, this::handle)
 				.onMessage(AcceptDataMessage.class, this::handle)
@@ -206,19 +196,6 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 		this.getContext().getLog().info("Status: overloaded = {} ({} / {})", overloaded,
 				this.availableMemory / 1024 / 1024, this.usedMemoryPredicted / 1024 / 1024);
-	}
-
-	private Behavior<Message> handle(InitialAttributesMessage message) {
-
-		// Initialize this worker's ID
-		this.workerId = message.getWorkerId();
-
-		// Initialize the column sets of attributes that this worker is responsible for
-		for (int attribute : message.getAttributes())
-			this.columns.put(attribute, new HashSet<>());
-
-		this.reportStatus();
-		return this;
 	}
 
 	private Behavior<Message> handle(DataMessage message) {
