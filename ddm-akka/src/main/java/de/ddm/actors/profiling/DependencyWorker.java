@@ -113,11 +113,11 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 	public static final String DEFAULT_NAME = "dependencyWorker";
 
-	public static Behavior<Message> create() {
-		return LoggingInterceptor.wrap(Behaviors.setup(DependencyWorker::new));
+	public static Behavior<Message> create(ActorRef<DataProvider.Message> dataProvider) {
+		return LoggingInterceptor.wrap(Behaviors.setup(context -> new DependencyWorker(context, dataProvider)));
 	}
 
-	private DependencyWorker(ActorContext<Message> context) {
+	private DependencyWorker(ActorContext<Message> context, ActorRef<DataProvider.Message> dataProvider) {
 		super(context);
 
 		final ActorRef<Receptionist.Listing> listingResponseAdapter = context.messageAdapter(Receptionist.Listing.class,
@@ -129,6 +129,10 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 				LargeMessageProxy.create(this.getContext().getSelf().unsafeUpcast(), false),
 				LargeMessageProxy.DEFAULT_NAME);
 
+		// Store DataProvider reference passed from Worker
+		this.localDataProvider = dataProvider;
+		context.getLog().info("DependencyWorker initialized with DataProvider: {}", dataProvider.path());
+
 		// We will use 40% of the available free memory for storing column data
 		this.availableMemory = (long) (0.4
 				* (Math.max(MemoryUtils.bytesMax(), MemoryUtils.bytesCommitted()) - MemoryUtils.bytesUsed()));
@@ -139,6 +143,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	/////////////////
 
 	private final ActorRef<LargeMessageProxy.Message> largeMessageProxy;
+	private final ActorRef<DataProvider.Message> localDataProvider; // Local DataProvider on this node
 	private List<ActorRef<DependencyWorkerHelper.Message>> dependencyWorkerHelpers;
 
 	private ActorRef<DependencyMiner.Message> dependencyMiner;
@@ -184,7 +189,10 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		if (!dependencyMiners.isEmpty() && (this.dependencyMiner == null)) {
 			this.dependencyMiner = dependencyMiners.iterator().next();
 			this.dependencyMiner
-					.tell(new DependencyMiner.RegistrationMessage(this.getContext().getSelf(), this.largeMessageProxy));
+					.tell(new DependencyMiner.RegistrationMessage(
+							this.getContext().getSelf(),
+							this.largeMessageProxy,
+							this.localDataProvider)); // Include DataProvider reference
 		}
 		return this;
 	}
@@ -335,11 +343,11 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 				DependencyWorkerCameo.DEFAULT_NAME,
 				DispatcherSelector.fromConfig("akka.worker-pool-dispatcher"));
 
-		// Spawn the helper actors
+		// Spawn the helper actors - they will request data from DataProvider as needed
 		this.dependencyWorkerHelpers = new ArrayList<>(numWorkers);
 		for (int id = 0; id < numWorkers; id++)
 			this.dependencyWorkerHelpers.add(this.getContext().spawn(
-					DependencyWorkerHelper.create(this.sortedColumns, cameo),
+					DependencyWorkerHelper.create(this.localDataProvider, cameo),
 					DependencyWorkerHelper.DEFAULT_NAME + "_" + id,
 					DispatcherSelector.fromConfig("akka.worker-pool-dispatcher")));
 
