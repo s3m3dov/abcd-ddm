@@ -7,6 +7,7 @@ import akka.actor.typed.javadsl.ActorContext;
 import akka.actor.typed.javadsl.Behaviors;
 import akka.actor.typed.javadsl.Receive;
 import de.ddm.serialization.AkkaSerializable;
+import de.ddm.utils.LoggingInterceptor;
 import it.unimi.dsi.fastutil.ints.*;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -51,7 +52,8 @@ public class DependencyWorkerHelper extends AbstractBehavior<DependencyWorkerHel
 
     public static Behavior<Message> create(Int2ObjectMap<List<String>> sortedColumns,
             ActorRef<DependencyWorkerCameo.Message> cameo) {
-        return Behaviors.setup(context -> new DependencyWorkerHelper(context, sortedColumns, cameo));
+        return LoggingInterceptor
+                .wrap(Behaviors.setup(context -> new DependencyWorkerHelper(context, sortedColumns, cameo)));
     }
 
     private DependencyWorkerHelper(ActorContext<Message> context, Int2ObjectMap<List<String>> sortedColumns,
@@ -81,6 +83,7 @@ public class DependencyWorkerHelper extends AbstractBehavior<DependencyWorkerHel
     }
 
     private Behavior<Message> handle(ValidateLocalTaskMessage message) {
+
         IntList lhss = new IntArrayList();
         IntList rhss = new IntArrayList();
 
@@ -111,6 +114,7 @@ public class DependencyWorkerHelper extends AbstractBehavior<DependencyWorkerHel
     }
 
     private Behavior<Message> handle(ValidateTaskMessage message) {
+
         IntList lhss = new IntArrayList();
         IntList rhss = new IntArrayList();
 

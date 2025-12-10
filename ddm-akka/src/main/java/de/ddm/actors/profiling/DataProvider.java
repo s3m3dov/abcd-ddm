@@ -9,6 +9,7 @@ import akka.actor.typed.javadsl.Receive;
 import akka.actor.typed.receptionist.Receptionist;
 import akka.actor.typed.receptionist.ServiceKey;
 import de.ddm.serialization.AkkaSerializable;
+import de.ddm.utils.LoggingInterceptor;
 import it.unimi.dsi.fastutil.ints.*;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -136,7 +137,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
             DEFAULT_NAME + "Service");
 
     public static Behavior<Message> create() {
-        return Behaviors.setup(DataProvider::new);
+        return LoggingInterceptor.wrap(Behaviors.setup(DataProvider::new));
     }
 
     private DataProvider(ActorContext<Message> context) {
@@ -180,6 +181,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(StoreColumnMessage message) {
+
         this.columnStore.put(message.getAttributeId(), message.getColumnData());
 
         this.getContext().getLog().debug("Stored column data for attribute {} ({} values)",
@@ -189,6 +191,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(RequestColumnMessage message) {
+
         Set<String> columnData = this.columnStore.get(message.getAttributeId());
 
         if (columnData == null) {
@@ -203,6 +206,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(RegisterAttributesMessage message) {
+
         int workerId = message.getWorkerId();
         int[] attributeIds = message.getAttributeIds();
 
@@ -222,6 +226,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(QueryAttributeOwnerMessage message) {
+
         int workerId = this.attributeToWorker.getOrDefault(message.getAttributeId(), -1);
 
         message.getReplyTo().tell(new ResponseAttributeOwnerMessage(
@@ -231,6 +236,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(GetStatisticsMessage message) {
+
         int totalAttributes = this.columnStore.size();
         long totalValues = this.columnStore.values().stream()
                 .mapToLong(Set::size)

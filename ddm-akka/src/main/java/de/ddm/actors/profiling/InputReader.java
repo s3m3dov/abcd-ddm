@@ -10,6 +10,7 @@ import akka.actor.typed.javadsl.Receive;
 import com.opencsv.CSVReader;
 import com.opencsv.exceptions.CsvValidationException;
 import de.ddm.serialization.AkkaSerializable;
+import de.ddm.utils.LoggingInterceptor;
 import de.ddm.singletons.InputConfigurationSingleton;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -54,15 +55,16 @@ public class InputReader extends AbstractBehavior<InputReader.Message> {
 	public static final String DEFAULT_NAME = "inputReader";
 
 	public static Behavior<Message> create(final int id, final File inputFile) {
-		return Behaviors.setup(context -> new InputReader(context, id, inputFile));
+		return LoggingInterceptor.wrap(Behaviors.setup(context -> new InputReader(context, id, inputFile)));
 	}
 
-	private InputReader(ActorContext<Message> context, final int id, final File inputFile) throws IOException, CsvValidationException {
+	private InputReader(ActorContext<Message> context, final int id, final File inputFile)
+			throws IOException, CsvValidationException {
 		super(context);
 		this.id = id;
 		this.reader = InputConfigurationSingleton.get().createCSVReader(inputFile);
 		this.header = InputConfigurationSingleton.get().getHeader(inputFile);
-		
+
 		if (InputConfigurationSingleton.get().isFileHasHeader())
 			this.reader.readNext();
 	}
@@ -94,6 +96,7 @@ public class InputReader extends AbstractBehavior<InputReader.Message> {
 	}
 
 	private Behavior<Message> handle(ReadBatchMessage message) throws IOException, CsvValidationException {
+
 		// Read a batch of lines and turn them into column sets
 		List<HashSet<String>> batchOfColumnSets = new ArrayList<>(this.header.length);
 		int i;
@@ -114,10 +117,11 @@ public class InputReader extends AbstractBehavior<InputReader.Message> {
 			return this;
 		}
 
-		// Turn the column sets into column arrays, because these can be serialized more effectively
+		// Turn the column sets into column arrays, because these can be serialized more
+		// effectively
 		String[][] batchOfColumnArrays = new String[this.header.length][];
 		for (i = 0; i < this.header.length; i++)
-			batchOfColumnArrays[i] = batchOfColumnSets.get(i).toArray(new String[]{});
+			batchOfColumnArrays[i] = batchOfColumnSets.get(i).toArray(new String[] {});
 
 		// Send the column arrays to respond to the current ReadBatchMessage
 		message.getReplyTo().tell(new DependencyMiner.BatchMessage(this.id, batchOfColumnArrays));

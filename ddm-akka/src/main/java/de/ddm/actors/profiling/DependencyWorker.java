@@ -11,6 +11,7 @@ import akka.actor.typed.receptionist.Receptionist;
 import de.ddm.actors.patterns.LargeMessageProxy;
 import de.ddm.serialization.AkkaSerializable;
 import de.ddm.singletons.SystemConfigurationSingleton;
+import de.ddm.utils.LoggingInterceptor;
 import de.ddm.utils.MemoryUtils;
 import it.unimi.dsi.fastutil.ints.*;
 import lombok.AllArgsConstructor;
@@ -113,19 +114,24 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	public static final String DEFAULT_NAME = "dependencyWorker";
 
 	public static Behavior<Message> create() {
-		return Behaviors.setup(DependencyWorker::new);
+		return LoggingInterceptor.wrap(Behaviors.setup(DependencyWorker::new));
 	}
 
 	private DependencyWorker(ActorContext<Message> context) {
 		super(context);
 
-		final ActorRef<Receptionist.Listing> listingResponseAdapter = context.messageAdapter(Receptionist.Listing.class, ReceptionistListingMessage::new);
-		context.getSystem().receptionist().tell(Receptionist.subscribe(DependencyMiner.dependencyMinerService, listingResponseAdapter));
+		final ActorRef<Receptionist.Listing> listingResponseAdapter = context.messageAdapter(Receptionist.Listing.class,
+				ReceptionistListingMessage::new);
+		context.getSystem().receptionist()
+				.tell(Receptionist.subscribe(DependencyMiner.dependencyMinerService, listingResponseAdapter));
 
-		this.largeMessageProxy = this.getContext().spawn(LargeMessageProxy.create(this.getContext().getSelf().unsafeUpcast(), false), LargeMessageProxy.DEFAULT_NAME);
+		this.largeMessageProxy = this.getContext().spawn(
+				LargeMessageProxy.create(this.getContext().getSelf().unsafeUpcast(), false),
+				LargeMessageProxy.DEFAULT_NAME);
 
 		// We will use 40% of the available free memory for storing column data
-		this.availableMemory = (long) (0.4 * (Math.max(MemoryUtils.bytesMax(), MemoryUtils.bytesCommitted()) - MemoryUtils.bytesUsed()));
+		this.availableMemory = (long) (0.4
+				* (Math.max(MemoryUtils.bytesMax(), MemoryUtils.bytesCommitted()) - MemoryUtils.bytesUsed()));
 	}
 
 	/////////////////
@@ -169,13 +175,16 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	private Behavior<Message> handle(ReceptionistListingMessage message) {
+
 		if (this.dependencyMiner != null)
 			return this;
 
-		Set<ActorRef<DependencyMiner.Message>> dependencyMiners = message.getListing().getServiceInstances(DependencyMiner.dependencyMinerService);
+		Set<ActorRef<DependencyMiner.Message>> dependencyMiners = message.getListing()
+				.getServiceInstances(DependencyMiner.dependencyMinerService);
 		if (!dependencyMiners.isEmpty() && (this.dependencyMiner == null)) {
 			this.dependencyMiner = dependencyMiners.iterator().next();
-			this.dependencyMiner.tell(new DependencyMiner.RegistrationMessage(this.getContext().getSelf(), this.largeMessageProxy));
+			this.dependencyMiner
+					.tell(new DependencyMiner.RegistrationMessage(this.getContext().getSelf(), this.largeMessageProxy));
 		}
 		return this;
 	}
@@ -187,10 +196,12 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		// Answer with status
 		this.dependencyMiner.tell(new DependencyMiner.StatusMessage(this.workerId, false, overloaded));
 
-		this.getContext().getLog().info("Status: overloaded = {} ({} / {})", overloaded, this.availableMemory / 1024 / 1024, this.usedMemoryPredicted / 1024 / 1024);
+		this.getContext().getLog().info("Status: overloaded = {} ({} / {})", overloaded,
+				this.availableMemory / 1024 / 1024, this.usedMemoryPredicted / 1024 / 1024);
 	}
 
 	private Behavior<Message> handle(InitialAttributesMessage message) {
+
 		// Initialize this worker's ID
 		this.workerId = message.getWorkerId();
 
@@ -203,6 +214,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	private Behavior<Message> handle(DataMessage message) {
+
 		// Store data and update value counts
 		Set<String> localColumn = this.columns.get(message.getAttribute());
 		long columnValueCountBefore = localColumn.size();
@@ -213,7 +225,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		// Update memory usage
 		this.updateMemoryUsage();
 
-		// Update acceptMessageCounter and test if this was the last message to be accepted, i.e., the batch has arrived
+		// Update acceptMessageCounter and test if this was the last message to be
+		// accepted, i.e., the batch has arrived
 		this.acceptMessageCounter++;
 		if (this.acceptMessageCounter == message.getMessagesToAccept()) {
 			this.acceptMessageCounter = 0;
@@ -242,6 +255,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	private Behavior<Message> handle(MoveDataMessage message) {
+
 		// Extract local columns that should be shared
 		Map<Integer, Set<String>> stolenColumns = new HashMap<>();
 		for (int attribute : message.getAttributes()) {
@@ -254,7 +268,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		this.updateMemoryUsage();
 
 		// Send columns to target worker
-		LargeMessageProxy.LargeMessage acceptDataMessage = new AcceptDataMessage(stolenColumns, message.getMoveMessages(), message.getToWorkerId());
+		LargeMessageProxy.LargeMessage acceptDataMessage = new AcceptDataMessage(stolenColumns,
+				message.getMoveMessages(), message.getToWorkerId());
 		this.largeMessageProxy.tell(new LargeMessageProxy.SendMessage(acceptDataMessage, message.getToWorkerLMP()));
 
 		this.reportStatus();
@@ -262,6 +277,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	private Behavior<Message> handle(AcceptDataMessage message) {
+
 		// Initialize this worker's ID
 		this.workerId = message.getWorkerId();
 
@@ -274,7 +290,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		// Update memory usage
 		this.updateMemoryUsage();
 
-		// Update acceptMessageCounter and test if this was the last message to be accepted, i.e., the stealing is done
+		// Update acceptMessageCounter and test if this was the last message to be
+		// accepted, i.e., the stealing is done
 		this.acceptMessageCounter++;
 		if (this.acceptMessageCounter == message.getMessagesToAccept()) {
 			this.acceptMessageCounter = 0;
@@ -311,7 +328,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	private void spawnHelperActors() {
 		final int numWorkers = SystemConfigurationSingleton.get().getNumWorkers();
 
-		// Spawn a cameo actor for the helpers to externalize the combination of the results for miner
+		// Spawn a cameo actor for the helpers to externalize the combination of the
+		// results for miner
 		ActorRef<DependencyWorkerCameo.Message> cameo = this.getContext().spawn(
 				DependencyWorkerCameo.create(this.dependencyMiner, numWorkers, this.workerId),
 				DependencyWorkerCameo.DEFAULT_NAME,
@@ -328,16 +346,19 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	private Behavior<Message> handle(ValidateLocalCandidatesMessage message) {
+
 		this.getContext().getLog().info("Validating all local INDs");
 
 		this.initializeValidation();
 
 		// Initialize the task messages for this validation round
-		List<DependencyWorkerHelper.ValidateLocalTaskMessage> tasks = new ArrayList<>(this.dependencyWorkerHelpers.size());
+		List<DependencyWorkerHelper.ValidateLocalTaskMessage> tasks = new ArrayList<>(
+				this.dependencyWorkerHelpers.size());
 		for (int i = 0; i < this.dependencyWorkerHelpers.size(); i++)
 			tasks.add(new DependencyWorkerHelper.ValidateLocalTaskMessage(new IntArrayList(), new IntArrayList()));
 
-		// Form all pairs of local attributes and assign them to the helper's tasks in a round-robin fashion
+		// Form all pairs of local attributes and assign them to the helper's tasks in a
+		// round-robin fashion
 		int nextHelper = 0;
 		int[] attributes = this.sortedColumns.keySet().toArray(new int[0]);
 		for (int i = 0; i < attributes.length - 1; i++) {
@@ -356,16 +377,20 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	private Behavior<Message> handle(ShareForValidationMessage message) {
+
 		this.initializeValidation();
 
 		// Send the local column to the remote worker for IND candidate validation
 		LargeMessageProxy.LargeMessage validateCandidatesMessage = new ValidateCandidatesMessage(
-				message.getAttribute(), this.sortedColumns.get(message.getAttribute()), message.getUntestedAttributes(), message.getToWorkerId());
-		this.largeMessageProxy.tell(new LargeMessageProxy.SendMessage(validateCandidatesMessage, message.getToWorkerLMP()));
+				message.getAttribute(), this.sortedColumns.get(message.getAttribute()), message.getUntestedAttributes(),
+				message.getToWorkerId());
+		this.largeMessageProxy
+				.tell(new LargeMessageProxy.SendMessage(validateCandidatesMessage, message.getToWorkerLMP()));
 		return this;
 	}
 
 	private Behavior<Message> handle(ValidateCandidatesMessage message) {
+
 		this.getContext().getLog().info("Validating " + message.getUntestedAttributes().length + " INDs");
 
 		this.initializeValidation();
@@ -373,7 +398,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		// Initialize the task messages for this validation round
 		List<DependencyWorkerHelper.ValidateTaskMessage> tasks = new ArrayList<>(this.dependencyWorkerHelpers.size());
 		for (int i = 0; i < this.dependencyWorkerHelpers.size(); i++)
-			tasks.add(new DependencyWorkerHelper.ValidateTaskMessage(message.getAttribute(), message.getColumn(), new IntArrayList()));
+			tasks.add(new DependencyWorkerHelper.ValidateTaskMessage(message.getAttribute(), message.getColumn(),
+					new IntArrayList()));
 
 		// Assign untested local columns to the helper's tasks in a round-robin fashion
 		int nextHelper = 0;
