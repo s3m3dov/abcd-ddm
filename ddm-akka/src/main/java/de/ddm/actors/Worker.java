@@ -52,7 +52,7 @@ public class Worker extends AbstractBehavior<Worker.Message> {
 		final int numWorkers = SystemConfigurationSingleton.get().getNumWorkers();
 		if (numWorkers > 0)
 			this.dependencyWorker = context.spawn(
-					DependencyWorker.create(),
+					DependencyWorker.create(this.dataProvider), // Pass DataProvider reference
 					DependencyWorker.DEFAULT_NAME,
 					DispatcherSelector.fromConfig("akka.worker-pinned-dispatcher"));
 	}
