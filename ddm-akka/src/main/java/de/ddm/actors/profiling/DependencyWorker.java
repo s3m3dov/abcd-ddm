@@ -12,7 +12,6 @@ import de.ddm.actors.patterns.LargeMessageProxy;
 import de.ddm.serialization.AkkaSerializable;
 import de.ddm.singletons.SystemConfigurationSingleton;
 import de.ddm.utils.LoggingInterceptor;
-import de.ddm.utils.MemoryUtils;
 import it.unimi.dsi.fastutil.ints.*;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -91,10 +90,6 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		// Store DataProvider reference passed from Worker
 		this.localDataProvider = dataProvider;
 		context.getLog().info("DependencyWorker initialized with DataProvider: {}", dataProvider.path());
-
-		// We will use 40% of the available free memory for storing column data
-		this.availableMemory = (long) (0.4
-				* (Math.max(MemoryUtils.bytesMax(), MemoryUtils.bytesCommitted()) - MemoryUtils.bytesUsed()));
 	}
 
 	/////////////////
