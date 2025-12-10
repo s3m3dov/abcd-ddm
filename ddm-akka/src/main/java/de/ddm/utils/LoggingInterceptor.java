@@ -21,7 +21,7 @@ public class LoggingInterceptor {
 
         @Override
         public Behavior<M> aroundReceive(TypedActorContext<M> ctx, M message, ReceiveTarget<M> target) {
-            log.debug("{} received {}: {}",
+            log.info("{} received {}: {}",
                     ctx.asJava().getSelf().path().name(),
                     message.getClass().getSimpleName(),
                     message);
@@ -30,7 +30,7 @@ public class LoggingInterceptor {
 
         @Override
         public Behavior<M> aroundSignal(TypedActorContext<M> ctx, Signal signal, SignalTarget<M> target) {
-            log.debug("{} received signal: {}",
+            log.info("{} received signal: {}",
                     ctx.asJava().getSelf().path().name(),
                     signal.getClass().getSimpleName());
             return target.apply(ctx, signal);
