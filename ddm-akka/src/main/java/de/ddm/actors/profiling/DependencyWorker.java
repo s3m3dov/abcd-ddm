@@ -39,38 +39,6 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 	@Getter
 	@NoArgsConstructor
-	@AllArgsConstructor
-	public static class DataMessage implements Message {
-		private static final long serialVersionUID = 8586787707165511461L;
-		int attribute;
-		String[] column;
-		int messagesToAccept;
-	}
-
-	@Getter
-	@NoArgsConstructor
-	@AllArgsConstructor
-	public static class MoveDataMessage implements Message {
-		private static final long serialVersionUID = -1382228729107690967L;
-		int[] attributes;
-		ActorRef<DependencyWorker.Message> toWorker;
-		int toWorkerId;
-		ActorRef<LargeMessageProxy.Message> toWorkerLMP;
-		int moveMessages;
-	}
-
-	@Getter
-	@NoArgsConstructor
-	@AllArgsConstructor
-	public static class AcceptDataMessage implements Message {
-		private static final long serialVersionUID = -7984837187618402770L;
-		Map<Integer, Set<String>> columns;
-		int messagesToAccept;
-		int workerId;
-	}
-
-	@Getter
-	@NoArgsConstructor
 	public static class ValidateLocalCandidatesMessage implements Message {
 		private static final long serialVersionUID = -2765506199949499328L;
 	}
@@ -140,17 +108,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	private ActorRef<DependencyMiner.Message> dependencyMiner;
 	private int workerId = -1;
 
-	private final long availableMemory;
-	private long usedMemoryMeasured;
-	private long usedMemoryPredicted;
-
 	private Int2ObjectMap<Set<String>> columns = new Int2ObjectArrayMap<>();
 	private Int2ObjectMap<List<String>> sortedColumns;
-	private long valueCount;
-	private double avgValueSize;
-	private final static long valueCountWithoutMemoryMeasurement = 100000;
-
-	private int acceptMessageCounter = 0;
 
 	////////////////////
 	// Actor Behavior //
@@ -160,9 +119,6 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	public Receive<Message> createReceive() {
 		return newReceiveBuilder()
 				.onMessage(ReceptionistListingMessage.class, this::handle)
-				.onMessage(DataMessage.class, this::handle)
-				.onMessage(MoveDataMessage.class, this::handle)
-				.onMessage(AcceptDataMessage.class, this::handle)
 				.onMessage(ValidateLocalCandidatesMessage.class, this::handle)
 				.onMessage(ShareForValidationMessage.class, this::handle)
 				.onMessage(ValidateCandidatesMessage.class, this::handle)
@@ -185,149 +141,6 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 							this.localDataProvider)); // Include DataProvider reference
 		}
 		return this;
-	}
-
-	private void reportStatus() {
-		// Calculate memory exhaustion
-		boolean overloaded = this.availableMemory < this.usedMemoryPredicted;
-
-		// Answer with status
-		this.dependencyMiner.tell(new DependencyMiner.StatusMessage(this.workerId, false, overloaded));
-
-		this.getContext().getLog().info("Status: overloaded = {} ({} / {})", overloaded,
-				this.availableMemory / 1024 / 1024, this.usedMemoryPredicted / 1024 / 1024);
-	}
-
-	private Behavior<Message> handle(DataMessage message) {
-
-		// Store data and update value counts
-		Set<String> localColumn = this.columns.get(message.getAttribute());
-		long columnValueCountBefore = localColumn.size();
-		localColumn.addAll(Arrays.asList(message.getColumn()));
-		long columnValueCountAfter = localColumn.size();
-		this.valueCount = this.valueCount - columnValueCountBefore + columnValueCountAfter;
-
-		// Update memory usage
-		this.updateMemoryUsage();
-
-		// Update acceptMessageCounter and test if this was the last message to be
-		// accepted, i.e., the batch has arrived
-		this.acceptMessageCounter++;
-		if (this.acceptMessageCounter == message.getMessagesToAccept()) {
-			this.acceptMessageCounter = 0;
-
-			this.reportStatus();
-		}
-		return this;
-	}
-
-	private void updateMemoryUsage() {
-		// Skip any memory measurement if the value count is and always was small
-		if ((this.valueCount < valueCountWithoutMemoryMeasurement) && (this.usedMemoryMeasured == 0))
-			return;
-
-		// Measure memory consumption if the memory was never measured before
-		if (this.usedMemoryMeasured == 0) {
-			this.usedMemoryMeasured = MemoryUtils.byteSizeOf(this.columns);
-			this.usedMemoryPredicted = this.usedMemoryMeasured;
-			this.avgValueSize = (double) this.usedMemoryMeasured / (double) this.valueCount;
-			return;
-		}
-
-		// Predict the memory consumption
-		this.usedMemoryPredicted = (long) Math.ceil(this.valueCount * this.avgValueSize);
-		return;
-	}
-
-	private Behavior<Message> handle(MoveDataMessage message) {
-
-		// Extract local columns that should be shared
-		Map<Integer, Set<String>> stolenColumns = new HashMap<>();
-		for (int attribute : message.getAttributes()) {
-			Set<String> stolenColumn = this.columns.remove(attribute);
-			stolenColumns.put(attribute, stolenColumn);
-			this.valueCount = this.valueCount - stolenColumn.size();
-		}
-
-		// Update memory usage
-		this.updateMemoryUsage();
-
-		// Send columns to target worker
-		LargeMessageProxy.LargeMessage acceptDataMessage = new AcceptDataMessage(stolenColumns,
-				message.getMoveMessages(), message.getToWorkerId());
-		this.largeMessageProxy.tell(new LargeMessageProxy.SendMessage(acceptDataMessage, message.getToWorkerLMP()));
-
-		this.reportStatus();
-		return this;
-	}
-
-	private Behavior<Message> handle(AcceptDataMessage message) {
-
-		// Initialize this worker's ID
-		this.workerId = message.getWorkerId();
-
-		// Accept the columns
-		for (Map.Entry<Integer, Set<String>> entry : message.getColumns().entrySet()) {
-			this.columns.put(entry.getKey().intValue(), entry.getValue());
-			this.valueCount = this.valueCount - entry.getValue().size();
-		}
-
-		// Update memory usage
-		this.updateMemoryUsage();
-
-		// Update acceptMessageCounter and test if this was the last message to be
-		// accepted, i.e., the stealing is done
-		this.acceptMessageCounter++;
-		if (this.acceptMessageCounter == message.getMessagesToAccept()) {
-			this.acceptMessageCounter = 0;
-
-			this.reportStatus();
-		}
-		return this;
-	}
-
-	private void initializeValidation() {
-		// Return if validation has already been initiated
-		if (this.sortedColumns != null)
-			return;
-
-		// Sort all columns for more effective IND candidate validation
-		this.sortColumns();
-
-		// Spawn helper actors to perform the actual candidate validations
-		this.spawnHelperActors();
-	}
-
-	private void sortColumns() {
-		this.sortedColumns = new Int2ObjectArrayMap<>(this.columns.size());
-		IntList attributes = new IntArrayList(this.columns.keySet());
-		for (int attribute : attributes) {
-			Set<String> column = this.columns.remove(attribute);
-			List<String> sortedColumn = new ArrayList<>(column);
-			Collections.sort(sortedColumn);
-			this.sortedColumns.put(attribute, sortedColumn);
-		}
-		this.columns = null;
-	}
-
-	private void spawnHelperActors() {
-		final int numWorkers = SystemConfigurationSingleton.get().getNumWorkers();
-
-		// Spawn a cameo actor for the helpers to externalize the combination of the
-		// results for miner
-		ActorRef<DependencyWorkerCameo.Message> cameo = this.getContext().spawn(
-				DependencyWorkerCameo.create(this.dependencyMiner, numWorkers, this.workerId),
-				DependencyWorkerCameo.DEFAULT_NAME,
-				DispatcherSelector.fromConfig("akka.worker-pool-dispatcher"));
-
-		// Spawn the helper actors - they will request data from DataProvider as needed
-		this.dependencyWorkerHelpers = new ArrayList<>(numWorkers);
-		for (int id = 0; id < numWorkers; id++)
-			this.dependencyWorkerHelpers.add(this.getContext().spawn(
-					DependencyWorkerHelper.create(this.localDataProvider, cameo),
-					DependencyWorkerHelper.DEFAULT_NAME + "_" + id,
-					DispatcherSelector.fromConfig("akka.worker-pool-dispatcher")));
-
 	}
 
 	private Behavior<Message> handle(ValidateLocalCandidatesMessage message) {
@@ -399,4 +212,53 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 		return this;
 	}
+
+    /////////////////
+    // Actor Utils //
+    /////////////////
+
+    private void initializeValidation() {
+		// Return if validation has already been initiated
+		if (this.sortedColumns != null)
+			return;
+
+		// Sort all columns for more effective IND candidate validation
+		this.sortColumns();
+
+		// Spawn helper actors to perform the actual candidate validations
+		this.spawnHelperActors();
+	}
+
+	private void sortColumns() {
+		this.sortedColumns = new Int2ObjectArrayMap<>(this.columns.size());
+		IntList attributes = new IntArrayList(this.columns.keySet());
+		for (int attribute : attributes) {
+			Set<String> column = this.columns.remove(attribute);
+			List<String> sortedColumn = new ArrayList<>(column);
+			Collections.sort(sortedColumn);
+			this.sortedColumns.put(attribute, sortedColumn);
+		}
+		this.columns = null;
+	}
+
+	private void spawnHelperActors() {
+		final int numWorkers = SystemConfigurationSingleton.get().getNumWorkers();
+
+		// Spawn a cameo actor for the helpers to externalize the combination of the
+		// results for miner
+		ActorRef<DependencyWorkerCameo.Message> cameo = this.getContext().spawn(
+				DependencyWorkerCameo.create(this.dependencyMiner, numWorkers, this.workerId),
+				DependencyWorkerCameo.DEFAULT_NAME,
+				DispatcherSelector.fromConfig("akka.worker-pool-dispatcher"));
+
+		// Spawn the helper actors - they will request data from DataProvider as needed
+		this.dependencyWorkerHelpers = new ArrayList<>(numWorkers);
+		for (int id = 0; id < numWorkers; id++)
+			this.dependencyWorkerHelpers.add(this.getContext().spawn(
+					DependencyWorkerHelper.create(this.localDataProvider, cameo),
+					DependencyWorkerHelper.DEFAULT_NAME + "_" + id,
+					DispatcherSelector.fromConfig("akka.worker-pool-dispatcher")));
+
+	}
+
 }
