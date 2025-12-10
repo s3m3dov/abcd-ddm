@@ -61,7 +61,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	@AllArgsConstructor
 	public static class StatusMessage implements Message {
 		private static final long serialVersionUID = -5302922080219823523L;
-		int workerId;
+		int dataProviderId;
 		boolean active;
 		boolean overloaded;
 	}
@@ -73,6 +73,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		private static final long serialVersionUID = -4025238529984914107L;
 		ActorRef<DependencyWorker.Message> dependencyWorker;
 		ActorRef<LargeMessageProxy.Message> dependencyWorkerLMP;
+        ActorRef<DataProvider.Message> localDataProvider;
 	}
 
 	@Getter
@@ -188,24 +189,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		return this;
 	}
 
-	private boolean isHeaderPhase() {
-		// The header phase lasts as long as header lines are still missing
-		return Arrays.stream(this.headerLines).anyMatch(Objects::isNull);
-	}
-
-	private boolean isBatchPhase() {
-		// The batch phase lasts as long as input readers are still unfinished and
-		// batches are pending
-		return !this.isHeaderPhase() &&
-				(this.inputReaderFinished.stream().anyMatch(b -> !b) ||
-						!this.pendingBatchMessages.isEmpty());
-	}
-
-	private boolean isValidationPhase() {
-		// The validation phase lasts until the algorithm ends
-		return !this.isBatchPhase();
-	}
-
 	private Behavior<Message> handle(HeaderMessage message) {
 		this.getContext().getLog().info("HeaderMessage! {} active workers",
 				this.dependencyWorkerActive.stream().filter(b -> b).count());
@@ -250,35 +233,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.startReading();
 
 		return this;
-	}
-
-	private void mapAttributesToWorkers() {
-		int numWorkers = this.dependencyWorkers.size();
-		int numAttributes = this.attribute2name.length;
-
-		// Assign attributes to workers with a round-robin strategy so that long and
-		// short columns are assigned approximately evenly to workers
-		this.attribute2worker = new int[numAttributes];
-		for (int attribute = 0; attribute < numAttributes; attribute++)
-			this.attribute2worker[attribute] = attribute % numWorkers;
-	}
-
-	private void startReading() {
-		// Initiate reading of the first batches
-		for (ActorRef<InputReader.Message> inputReader : this.inputReaders)
-			inputReader.tell(new InputReader.ReadBatchMessage(this.getContext().getSelf(), batchSize));
-
-		// Inform the dependency workers about their initial responsibilities
-		for (int workerId = 0; workerId < this.dependencyWorkers.size(); workerId++) {
-			IntArrayList attributes = new IntArrayList();
-			for (int attribute = 0; attribute < this.attribute2worker.length; attribute++)
-				if (this.attribute2worker[attribute] == workerId)
-					attributes.add(attribute);
-
-			this.dependencyWorkers.get(workerId)
-					.tell(new DependencyWorker.InitialAttributesMessage(attributes.toArray(new int[0]), workerId));
-			this.dependencyWorkerActive.set(workerId, true);
-		}
 	}
 
 	private Behavior<Message> handle(BatchMessage message) {
@@ -444,7 +398,125 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		return this;
 	}
 
-	private void stealAttributesTo(ActorRef<DependencyWorker.Message> worker, int workerId,
+	private Behavior<Message> handle(ResultMessage message) {
+		this.getContext().getLog().info("ResultMessage! {} INDs from worker {}", message.getLhss().length,
+				message.getWorkerId());
+
+		// Create Inclusion Dependency objects from the results
+		List<InclusionDependency> inds = new ArrayList<>(message.getLhss().length);
+		for (int i = 0; i < message.getLhss().length; i++) {
+			String[] dependentAttributes = { this.attribute2name[message.getLhss()[i]] };
+			String[] referencedAttributes = { this.attribute2name[message.getRhss()[i]] };
+			inds.add(new InclusionDependency(this.attribute2file[message.getLhss()[i]], dependentAttributes,
+					this.attribute2file[message.getRhss()[i]], referencedAttributes));
+		}
+
+		// Send Inclusion Dependency objects to the result collector
+		this.resultCollector.tell(new ResultCollector.ResultMessage(inds));
+
+		// Find more work for the dependency worker
+		int workerId = message.getWorkerId();
+		for (int attribute : this.worker2attributes.get(workerId)) {
+			for (int otherAttribute = 0; otherAttribute < this.attribute2name.length; otherAttribute++) {
+				if (!this.candidateMatrix[attribute][otherAttribute]) {
+					// Collect all the worker's attributes that still require validation with the
+					// current other attribute and mark them validated
+					IntList untestedAttributes = new IntArrayList(this.worker2attributes.get(workerId).size());
+					for (int untestedAttributeCandidate : this.worker2attributes.get(workerId)) {
+						if (!this.candidateMatrix[otherAttribute][untestedAttributeCandidate]) {
+							this.candidateMatrix[otherAttribute][untestedAttributeCandidate] = true;
+							this.candidateMatrix[untestedAttributeCandidate][otherAttribute] = true;
+							untestedAttributes.add(untestedAttributeCandidate);
+						}
+					}
+
+					// Tell the owner of the other attribute to send that attribute's column to the
+					// worker for validation
+					int otherWorkerId = this.attribute2worker[otherAttribute];
+					this.dependencyWorkers.get(otherWorkerId).tell(new DependencyWorker.ShareForValidationMessage(
+							otherAttribute, untestedAttributes.toIntArray(), this.dependencyWorkers.get(workerId),
+							workerId, this.dependencyWorkerLMPs.get(workerId)));
+
+					return this;
+				}
+			}
+		}
+
+		// Set the worker to inactive, because no further validation work could be found
+		// for its attributes
+		this.dependencyWorkerActive.set(workerId, false);
+
+		// End the program when
+        // all INDs have been checked, which means all workers are inactive now
+		if (this.dependencyWorkerActive.stream().noneMatch(b -> b)) {
+            this.resultCollector.tell(new ResultCollector.FinalizeMessage());
+            long discoveryTime = System.currentTimeMillis() - this.startTime;
+            this.getContext().getLog().info("Finished mining within {} ms!", discoveryTime);
+        }
+		return this;
+	}
+
+	private Behavior<Message> handle(Terminated signal) {
+		ActorRef<DependencyWorker.Message> dependencyWorker = signal.getRef().unsafeUpcast();
+		this.dependencyWorkers.remove(dependencyWorker);
+		return this;
+	}
+
+    /////////////////
+    // Actor Utils //
+    /////////////////
+
+    // * PHASE CHECKS * //
+    private boolean isHeaderPhase() {
+		// The header phase lasts as long as header lines are still missing
+		return Arrays.stream(this.headerLines).anyMatch(Objects::isNull);
+	}
+
+	private boolean isBatchPhase() {
+		// The batch phase lasts as long as input readers are still unfinished and
+		// batches are pending
+		return !this.isHeaderPhase() &&
+				(this.inputReaderFinished.stream().anyMatch(b -> !b) ||
+						!this.pendingBatchMessages.isEmpty());
+	}
+
+	private boolean isValidationPhase() {
+		// The validation phase lasts until the algorithm ends
+		return !this.isBatchPhase();
+	}
+
+    // * MAPPING & READING * //
+    private void mapAttributesToWorkers() {
+		int numWorkers = this.dependencyWorkers.size();
+		int numAttributes = this.attribute2name.length;
+
+		// Assign attributes to workers with a round-robin strategy so that long and
+		// short columns are assigned approximately evenly to workers
+		this.attribute2worker = new int[numAttributes];
+		for (int attribute = 0; attribute < numAttributes; attribute++)
+			this.attribute2worker[attribute] = attribute % numWorkers;
+	}
+
+	private void startReading() {
+		// Initiate reading of the first batches
+		for (ActorRef<InputReader.Message> inputReader : this.inputReaders)
+			inputReader.tell(new InputReader.ReadBatchMessage(this.getContext().getSelf(), batchSize));
+
+		// Inform the dependency workers about their initial responsibilities
+		for (int workerId = 0; workerId < this.dependencyWorkers.size(); workerId++) {
+			IntArrayList attributes = new IntArrayList();
+			for (int attribute = 0; attribute < this.attribute2worker.length; attribute++)
+				if (this.attribute2worker[attribute] == workerId)
+					attributes.add(attribute);
+
+			this.dependencyWorkers.get(workerId)
+					.tell(new DependencyWorker.InitialAttributesMessage(attributes.toArray(new int[0]), workerId));
+			this.dependencyWorkerActive.set(workerId, true);
+		}
+	}
+
+    // * STEALING * //
+    private void stealAttributesTo(ActorRef<DependencyWorker.Message> worker, int workerId,
 			ActorRef<LargeMessageProxy.Message> workerLMP) {
 		// Find attributes to steal; we aim to steal evenly from the workers with the
 		// most partitions (this is a very simple stealing approach)
@@ -507,6 +579,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.dependencyWorkerActive.set(workerId, true);
 	}
 
+    // * VALIDATION PHASE * //
 	private void initiateValidationPhase() {
 		int numAttributes = this.attribute2name.length;
 		int numWorkers = this.dependencyWorkers.size();
@@ -547,71 +620,4 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 	}
 
-	private Behavior<Message> handle(ResultMessage message) {
-		this.getContext().getLog().info("ResultMessage! {} INDs from worker {}", message.getLhss().length,
-				message.getWorkerId());
-
-		// Create Inclusion Dependency objects from the results
-		List<InclusionDependency> inds = new ArrayList<>(message.getLhss().length);
-		for (int i = 0; i < message.getLhss().length; i++) {
-			String[] dependentAttributes = { this.attribute2name[message.getLhss()[i]] };
-			String[] referencedAttributes = { this.attribute2name[message.getRhss()[i]] };
-			inds.add(new InclusionDependency(this.attribute2file[message.getLhss()[i]], dependentAttributes,
-					this.attribute2file[message.getRhss()[i]], referencedAttributes));
-		}
-
-		// Send Inclusion Dependency objects to the result collector
-		this.resultCollector.tell(new ResultCollector.ResultMessage(inds));
-
-		// Find more work for the dependency worker
-		int workerId = message.getWorkerId();
-		for (int attribute : this.worker2attributes.get(workerId)) {
-			for (int otherAttribute = 0; otherAttribute < this.attribute2name.length; otherAttribute++) {
-				if (!this.candidateMatrix[attribute][otherAttribute]) {
-					// Collect all the worker's attributes that still require validation with the
-					// current other attribute and mark them validated
-					IntList untestedAttributes = new IntArrayList(this.worker2attributes.get(workerId).size());
-					for (int untestedAttributeCandidate : this.worker2attributes.get(workerId)) {
-						if (!this.candidateMatrix[otherAttribute][untestedAttributeCandidate]) {
-							this.candidateMatrix[otherAttribute][untestedAttributeCandidate] = true;
-							this.candidateMatrix[untestedAttributeCandidate][otherAttribute] = true;
-							untestedAttributes.add(untestedAttributeCandidate);
-						}
-					}
-
-					// Tell the owner of the other attribute to send that attribute's column to the
-					// worker for validation
-					int otherWorkerId = this.attribute2worker[otherAttribute];
-					this.dependencyWorkers.get(otherWorkerId).tell(new DependencyWorker.ShareForValidationMessage(
-							otherAttribute, untestedAttributes.toIntArray(), this.dependencyWorkers.get(workerId),
-							workerId, this.dependencyWorkerLMPs.get(workerId)));
-
-					return this;
-				}
-			}
-		}
-
-		// Set the worker to inactive, because no further validation work could be found
-		// for its attributes
-		this.dependencyWorkerActive.set(workerId, false);
-
-		// End the program if all INDs have been checked, which is, if all workers are
-		// inactive now
-		if (this.dependencyWorkerActive.stream().noneMatch(b -> b))
-			this.end();
-
-		return this;
-	}
-
-	private void end() {
-		this.resultCollector.tell(new ResultCollector.FinalizeMessage());
-		long discoveryTime = System.currentTimeMillis() - this.startTime;
-		this.getContext().getLog().info("Finished mining within {} ms!", discoveryTime);
-	}
-
-	private Behavior<Message> handle(Terminated signal) {
-		ActorRef<DependencyWorker.Message> dependencyWorker = signal.getRef().unsafeUpcast();
-		this.dependencyWorkers.remove(dependencyWorker);
-		return this;
-	}
 }
