@@ -1,22 +1,35 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <configuration>
-    <!-- Console appender with colorized output -->
+    <property name="LOG_FILE" value="${LOG_FILE:-logs/ddm-akka.log}" />
+    <property name="CONSOLE_LOG_PATTERN" value="%d{HH:mm:ss.SSS} %highlight(%-5level) | %magenta(%thread) | %cyan(%X{akkaSource:-local}): %.-1000msg%n%ex{short}" />
+    <property name="FILE_LOG_PATTERN" value="%d{HH:mm:ss.SSS} %-5level | %thread | %X{akkaSource:-local}: %msg%n%ex{short}" />
+
+    <!-- Console appender -->
     <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
-            <!-- Colorized pattern with:
-                 - %highlight for log level colors (ERROR=red, WARN=yellow, INFO=blue, DEBUG=cyan, TRACE=white)
-                 - %cyan for logger name
-                 - %magenta for thread name
-                 - Akka source information preserved
-            -->
-            <pattern>%d{HH:mm:ss.SSS} %highlight(%-5level) [%magenta(%thread)] %cyan(%-40.40logger{36}) %50.50X{akkaSource:-local} - %msg%n</pattern>
+            <pattern>${CONSOLE_LOG_PATTERN}</pattern>
         </encoder>
+    </appender>
+
+    <!-- File appender with rolling policy -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_FILE}</file>
+        <encoder>
+            <pattern>${FILE_LOG_PATTERN}</pattern>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <!-- Daily rollover -->
+            <fileNamePattern>${LOG_FILE}.%d{yyyy-MM-dd}.gz</fileNamePattern>
+            <!-- Keep 7 days of history -->
+            <maxHistory>7</maxHistory>
+        </rollingPolicy>
     </appender>
 
     <!-- Root logger level - change to DEBUG for more verbose output -->
     <root level="INFO">
         <appender-ref ref="STDOUT"/>
+        <appender-ref ref="FILE"/>
     </root>
 
     <!-- Specific loggers to different levels -->
