@@ -269,7 +269,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	}
 
 	private Behavior<Message> handle(BatchMessage message) {
-		this.getContext().getLog().info("BatchMessage! {} active data providers",
+		this.getContext().getLog().info("BatchMessage Received: {} active data providers",
 				this.dataProvidersActive.stream().filter(b -> b).count());
 
 		// Close the reading process for this file if the last line was read
@@ -293,6 +293,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		// Wait for more workers to join and steal if any number of workers is
 		// overloaded
 		if (this.dataProvidersOverloaded.stream().anyMatch(b -> b)) {
+            this.getContext().getLog().info("Delaying batch processing because one or more DataProviders are overloaded");
 			this.pendingBatchMessages.add(message);
 			return this;
 		}
@@ -312,6 +313,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			int attribute = this.file2attribute.get(file)[i];
 			int dataProviderId = this.attribute2dataProvider[attribute];
 			if (this.dataProvidersActive.getBoolean(dataProviderId)) {
+                this.getContext().getLog().info("Delaying batch processing because target DataProvider-{} is still active", dataProviderId);
 				this.pendingBatchMessages.add(message);
 				return this;
 			}
@@ -339,7 +341,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	}
 
 	private Behavior<Message> handle(StatusMessage message) {
-		this.getContext().getLog().info("StatusMessage! {} active DataProviders",
+		this.getContext().getLog().info("StatusMessage Received: {} Active DataProviders",
 				this.dataProvidersActive.stream().filter(b -> b).count());
 
 		this.dataProvidersActive.set(message.getDataProviderId(), message.isActive());
@@ -526,8 +528,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		// DataProvider ID is its index in the list
 		int dataProviderId = this.dataProviders.size() - 1;
-
-		this.getContext().getLog().info("Registered DataProvider {}", dataProviderId);
+		this.getContext().getLog().info("Registered DataProvider-{}", dataProviderId);
 	}
 
     private void registerNewWorker(ActorRef<DependencyWorker.Message> dependencyWorker,
