@@ -258,7 +258,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 
 		// Wait if no workers have registered yet
-		if (this.dependencyWorkers.isEmpty())
+		if (this.dataProviders.isEmpty())
 			return this;
 
 		// Map data providers to attributes and start reading
