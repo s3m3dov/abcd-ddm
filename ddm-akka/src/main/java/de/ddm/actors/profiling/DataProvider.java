@@ -197,17 +197,21 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(ReceptionistListingMessage message) {
-        // Discover DependencyMiner if not already known
-        if (this.dependencyMiner != null)
-            return this;
-
         Set<ActorRef<DependencyMiner.Message>> dependencyMiners = message.getListing()
                 .getServiceInstances(DependencyMiner.dependencyMinerService);
-        if (!dependencyMiners.isEmpty()) {
+
+        // Register with DependencyMiner when discovered
+        if (!dependencyMiners.isEmpty() && (this.dependencyMiner == null)) {
             this.dependencyMiner = dependencyMiners.iterator().next();
-            this.getContext().getLog().info("DataProvider discovered DependencyMiner: {}",
-                    this.dependencyMiner.path());
+
+            // Send registration message to DependencyMiner
+            this.dependencyMiner.tell(new DependencyMiner.DataProviderRegistrationMessage(
+                    this.getContext().getSelf(),
+                    this.largeMessageProxy));
+
+            this.getContext().getLog().info("Registered with DependencyMiner");
         }
+
         return this;
     }
 
@@ -341,7 +345,6 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         }
         this.columns = null; // Free memory from loading phase
     }
-
 
     /**
      * Report current memory status to DependencyMiner
