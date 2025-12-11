@@ -103,9 +103,6 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	private ActorRef<DependencyMiner.Message> dependencyMiner;
 	private int workerId = -1;
 
-	private Int2ObjectMap<Set<String>> columns = new Int2ObjectArrayMap<>();
-	private Int2ObjectMap<List<String>> sortedColumns;
-
 	////////////////////
 	// Actor Behavior //
 	////////////////////
@@ -153,7 +150,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		// Form all pairs of local attributes and assign them to the helper's tasks in a
 		// round-robin fashion
 		int nextHelper = 0;
-		int[] attributes = this.sortedColumns.keySet().toArray(new int[0]);
+		int[] attributes = message.getLocalAttributes(); // Attributes from DependencyMiner
 		for (int i = 0; i < attributes.length - 1; i++) {
 			for (int j = i + 1; j < attributes.length; j++) {
 				tasks.get(nextHelper).getAttributes1().add(attributes[i]);
@@ -163,6 +160,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		}
 
 		// Send all validation tasks to the corresponding helpers
+		// Helpers will query DataProvider for actual column data
 		for (int i = 0; i < this.dependencyWorkerHelpers.size(); i++)
 			this.dependencyWorkerHelpers.get(i).tell(tasks.get(i));
 
@@ -208,32 +206,18 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		return this;
 	}
 
-    /////////////////
-    // Actor Utils //
-    /////////////////
+	/////////////////
+	// Actor Utils //
+	/////////////////
 
-    private void initializeValidation() {
+	private void initializeValidation() {
 		// Return if validation has already been initiated
-		if (this.sortedColumns != null)
+		if (this.dependencyWorkerHelpers != null)
 			return;
 
-		// Sort all columns for more effective IND candidate validation
-		this.sortColumns();
-
 		// Spawn helper actors to perform the actual candidate validations
+		// Helpers will request data from DataProvider as needed
 		this.spawnHelperActors();
-	}
-
-	private void sortColumns() {
-		this.sortedColumns = new Int2ObjectArrayMap<>(this.columns.size());
-		IntList attributes = new IntArrayList(this.columns.keySet());
-		for (int attribute : attributes) {
-			Set<String> column = this.columns.remove(attribute);
-			List<String> sortedColumn = new ArrayList<>(column);
-			Collections.sort(sortedColumn);
-			this.sortedColumns.put(attribute, sortedColumn);
-		}
-		this.columns = null;
 	}
 
 	private void spawnHelperActors() {
