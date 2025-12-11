@@ -149,6 +149,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 		// Form all pairs of local attributes and assign them to the helper's tasks in a
 		// round-robin fashion
+        /*
 		int nextHelper = 0;
 		int[] attributes = message.getLocalAttributes(); // Attributes from DependencyMiner
 		for (int i = 0; i < attributes.length - 1; i++) {
@@ -158,6 +159,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 				nextHelper = (nextHelper == tasks.size() - 1) ? 0 : nextHelper + 1;
 			}
 		}
+         */
 
 		// Send all validation tasks to the corresponding helpers
 		// Helpers will query DataProvider for actual column data
@@ -169,14 +171,15 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 	private Behavior<Message> handle(ShareForValidationMessage message) {
 
+        /*
 		this.initializeValidation();
-
 		// Send the local column to the remote worker for IND candidate validation
 		LargeMessageProxy.LargeMessage validateCandidatesMessage = new ValidateCandidatesMessage(
 				message.getAttribute(), this.sortedColumns.get(message.getAttribute()), message.getUntestedAttributes(),
 				message.getToWorkerId());
 		this.largeMessageProxy
 				.tell(new LargeMessageProxy.SendMessage(validateCandidatesMessage, message.getToWorkerLMP()));
+		*/
 		return this;
 	}
 
@@ -231,13 +234,14 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 				DispatcherSelector.fromConfig("akka.worker-pool-dispatcher"));
 
 		// Spawn the helper actors - they will request data from DataProvider as needed
+        /*
 		this.dependencyWorkerHelpers = new ArrayList<>(numWorkers);
 		for (int id = 0; id < numWorkers; id++)
 			this.dependencyWorkerHelpers.add(this.getContext().spawn(
 					DependencyWorkerHelper.create(this.localDataProvider, cameo),
 					DependencyWorkerHelper.DEFAULT_NAME + "_" + id,
 					DispatcherSelector.fromConfig("akka.worker-pool-dispatcher")));
-
+        */
 	}
 
 }
