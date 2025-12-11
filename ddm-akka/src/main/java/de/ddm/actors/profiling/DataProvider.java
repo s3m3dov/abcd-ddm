@@ -286,7 +286,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         // Accept the columns
         for (Map.Entry<Integer, Set<String>> entry : message.getColumns().entrySet()) {
             this.columns.put(entry.getKey().intValue(), entry.getValue());
-            this.valueCount = this.valueCount - entry.getValue().size();
+            this.valueCount = this.valueCount + entry.getValue().size(); // Add values when accepting
         }
 
         // Update memory usage
@@ -357,7 +357,8 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         // Answer with status
         this.dependencyMiner.tell(new DependencyMiner.StatusMessage(this.dataProviderId, false, overloaded));
 
-        this.getContext().getLog().info("DataProvider-{} Status: overloaded = {} ({} / {})", this.dataProviderId, overloaded,
+        this.getContext().getLog().info("DataProvider-{} Status: overloaded = {} ({} / {})", this.dataProviderId,
+                overloaded,
                 this.availableMemory / 1024 / 1024, this.usedMemoryPredicted / 1024 / 1024);
     }
 
