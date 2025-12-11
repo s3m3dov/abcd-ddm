@@ -221,8 +221,9 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         for (int attribute : message.getAttributes()) {
             this.columns.put(attribute, new HashSet<>());
         }
-        this.getContext().getLog().info("DataProvider-{} registered {} attributes",
+        this.getContext().getLog().info("DataProvider-{} registered {} attributes, reporting status...",
                 message.getAttributes().length, this.dataProviderId);
+        this.reportStatus();
         return this;
     }
 
@@ -356,7 +357,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         // Answer with status
         this.dependencyMiner.tell(new DependencyMiner.StatusMessage(this.dataProviderId, false, overloaded));
 
-        this.getContext().getLog().info("Status: overloaded = {} ({} / {})", overloaded,
+        this.getContext().getLog().info("DataProvider-{} Status: overloaded = {} ({} / {})", this.dataProviderId, overloaded,
                 this.availableMemory / 1024 / 1024, this.usedMemoryPredicted / 1024 / 1024);
     }
 

@@ -544,7 +544,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int dataProviderId = this.dataProviders.indexOf(localDataProvider);
 		this.dataProvider2workers.computeIfAbsent(dataProviderId, k -> new ArrayList<>()).add(workerId);
 
-		this.getContext().getLog().info("Registered Worker {} co-located with DataProvider {}",
+		this.getContext().getLog().info("Registered Worker-{} co-located with DataProvider-{}",
 				workerId, dataProviderId);
 	}
 
