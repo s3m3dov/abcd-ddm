@@ -389,27 +389,26 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			return this;
 		}
 
-		// Trigger rebalancing at batch boundary
+		// Trigger rebalancing immediately if overloaded and new DataProviders available
+		if (this.isBatchPhase()
+				&& !this.isRebalancing
+				&& this.dataProvidersOverloaded.stream().anyMatch(b -> b) // Any overloaded
+				&& !this.pendingDataProviderRegistrations.isEmpty()) {
+
+			this.getContext().getLog()
+					.info("DataProvider overloaded with pending registrations, starting immediate rebalancing");
+			this.triggerRebalancing();
+			return this;
+		}
+
+		// Trigger rebalancing at batch boundary (all idle)
 		if (this.isBatchPhase()
 				&& !this.isRebalancing
 				&& this.dataProvidersActive.stream().noneMatch(b -> b) // All idle
 				&& !this.pendingDataProviderRegistrations.isEmpty()) {
 
 			this.getContext().getLog().info("Batch boundary reached with pending registrations, starting rebalancing");
-
-			// Process pending registrations and trigger rebalancing
-			for (DataProviderRegistrationMessage registrationMessage : this.pendingDataProviderRegistrations) {
-				int newDataProviderId = this.dataProviders.size() - 1; // Already registered in
-																		// handle(DataProviderRegistrationMessage)
-				this.stealAttributesTo(
-                        newDataProviderId,
-                        registrationMessage.getDataProvider(),
-                        registrationMessage.getDataProviderLMP());
-			}
-			this.pendingDataProviderRegistrations.clear();
-
-			this.isRebalancing = true;
-			this.getContext().getLog().info("Rebalancing in progress, batches will be delayed");
+			this.triggerRebalancing();
 			return this;
 		}
 
@@ -440,11 +439,10 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		if (this.dataProviders.contains(dataProvider))
 			return this;
 
-		// Register the DataProvider
-		this.registerNewDataProvider(dataProvider, dataProviderLMP);
-
-		// If we're in batch phase and this is the first DataProvider, start reading
-		if (this.isBatchPhase() && this.dataProviders.size() == 1) {
+		// If we're in batch phase and this is the first DataProvider, register and
+		// start reading
+		if (this.isBatchPhase() && this.dataProviders.isEmpty()) {
+			this.registerNewDataProvider(dataProvider, dataProviderLMP);
 			this.mapAttributesToDataProviders();
 			this.startReading();
 			return this;
@@ -454,9 +452,17 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		if (this.isValidationPhase())
 			return this;
 
-		// Otherwise, add to pending for batch-boundary rebalancing
+		// Otherwise, add to pending for batch-boundary rebalancing (don't register yet)
 		this.pendingDataProviderRegistrations.add(message);
 		this.getContext().getLog().info("Added DataProvider to pending, will rebalance at next batch boundary");
+
+		// If DataProviders are overloaded, trigger immediate rebalancing
+		if (!this.isRebalancing && this.dataProvidersOverloaded.stream().anyMatch(b -> b)) {
+			this.getContext().getLog()
+					.info("DataProvider overloaded with pending registrations, starting immediate rebalancing");
+			this.triggerRebalancing();
+		}
+
 		return this;
 	}
 
@@ -631,13 +637,41 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 	}
 
-	// * STEALING * //
+	// * REBALANCING * //
+	/**
+	 * Trigger rebalancing by processing pending DataProvider registrations
+	 * and initiating attribute stealing to the new DataProviders.
+	 */
+	private void triggerRebalancing() {
+		// Process pending registrations and trigger rebalancing
+		for (DataProviderRegistrationMessage registrationMessage : this.pendingDataProviderRegistrations) {
+			// Register the DataProvider now
+			this.registerNewDataProvider(
+					registrationMessage.getDataProvider(),
+					registrationMessage.getDataProviderLMP());
+
+			int newDataProviderId = this.dataProviders.size() - 1; // ID assigned by registerNewDataProvider
+
+			// Steal attributes to the new DataProvider
+			this.stealAttributesTo(
+					newDataProviderId,
+					registrationMessage.getDataProvider(),
+					registrationMessage.getDataProviderLMP());
+		}
+		this.pendingDataProviderRegistrations.clear();
+
+		this.isRebalancing = true;
+		this.getContext().getLog().info("Rebalancing in progress, batches will be delayed");
+	}
+
+	/**
+	 * Steal attributes from existing DataProviders to the target DataProvider.
+	 */
 	private void stealAttributesTo(int targetDataProviderId,
-            ActorRef<DataProvider.Message> targetDataProvider,
+			ActorRef<DataProvider.Message> targetDataProvider,
 			ActorRef<LargeMessageProxy.Message> targetDataProviderLMP) {
 		// Find attributes to steal; we aim to steal evenly from the DataProviders with
-		// the
-		// most partitions (this is a very simple stealing approach)
+		// the most partitions (this is a very simple stealing approach)
 		IntSet attributesToSteal = new IntAVLTreeSet();
 		int numDataProviders = this.dataProviders.size();
 		int numAttributes = this.attribute2name.length;
@@ -647,6 +681,10 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		for (int dpId : this.attribute2dataProvider)
 			attributesPerDataProviderCounts[dpId] += 1;
 
+        // Log detailed attribute distribution BEFORE and AFTER rebalancing
+		logAttributeDistribution("BEFORE rebalancing", attributesPerDataProviderCounts);
+
+        // Steal attributes
 		Random random = new Random();
 		while (attributesToSteal.size() < numAttributesToSteal) {
 			// Find DataProvider with the currently most partitions
@@ -676,8 +714,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 
 		// Collect the stolen attributes for every DataProvider that needs to send
-		// stolen
-		// attributes to the new DataProvider and reassign stolen attributes
+		// stolen attributes to the new DataProvider and reassign stolen attributes
 		Int2ObjectMap<IntArrayList> dataProvider2stolenAttributes = new Int2ObjectArrayMap<>(this.dataProviders.size());
 		for (int attribute : attributesToSteal) {
 			int sourceDataProviderId = this.attribute2dataProvider[attribute];
@@ -694,7 +731,8 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			int[] attributes = entry.getValue().toArray(new int[0]);
 			int sourceDataProviderId = entry.getIntKey();
 			DataProvider.MoveDataMessage moveDataMessage = new DataProvider.MoveDataMessage(
-					attributes, targetDataProviderId, targetDataProvider, targetDataProviderLMP, dataProvider2stolenAttributes.size());
+					attributes, targetDataProviderId, targetDataProvider, targetDataProviderLMP,
+					dataProvider2stolenAttributes.size());
 			this.dataProviders.get(sourceDataProviderId).tell(moveDataMessage);
 			this.dataProvidersActive.set(sourceDataProviderId, true);
 		}
@@ -708,6 +746,40 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		this.getContext().getLog().info("Rebalancing involves {} DataProviders",
 				this.rebalancingDataProviderIds.size());
+
+		// Calculate AFTER distribution
+		int[] attributeCountsAfter = new int[this.dataProviders.size()];
+		for (int attribute = 0; attribute < this.attribute2dataProvider.length; attribute++) {
+			attributeCountsAfter[this.attribute2dataProvider[attribute]]++;
+		}
+		logAttributeDistribution("AFTER rebalancing", attributeCountsAfter);
+	}
+
+	/**
+	 * Log detailed attribute distribution showing counts and attribute IDs for each
+	 * DataProvider.
+	 */
+	private void logAttributeDistribution(String label, int[] attributeCounts) {
+		StringBuilder summary = new StringBuilder(label + " - Counts: ");
+		for (int dpId = 0; dpId < attributeCounts.length; dpId++) {
+			summary.append("DP-").append(dpId).append(": ").append(attributeCounts[dpId]);
+			if (dpId < attributeCounts.length - 1) {
+				summary.append(", ");
+			}
+		}
+		this.getContext().getLog().info(summary.toString());
+
+		// Log detailed attribute IDs for each DataProvider
+		for (int dpId = 0; dpId < this.dataProviders.size(); dpId++) {
+			IntList attributeIds = new IntArrayList();
+			for (int attribute = 0; attribute < this.attribute2dataProvider.length; attribute++) {
+				if (this.attribute2dataProvider[attribute] == dpId) {
+					attributeIds.add(attribute);
+				}
+			}
+			this.getContext().getLog().info("{} - DataProvider-{}: {} attributes -> {}",
+					label, dpId, attributeIds.size(), attributeIds);
+		}
 	}
 
 	// * VALIDATION PHASE * //
