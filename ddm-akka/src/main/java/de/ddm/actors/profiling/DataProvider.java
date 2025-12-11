@@ -221,7 +221,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         for (int attribute : message.getAttributes()) {
             this.columns.put(attribute, new HashSet<>());
         }
-        this.getContext().getLog().info("DataProvider registered {} attributes for worker {}",
+        this.getContext().getLog().info("DataProvider registered {} attributes as DataProvider-{}",
                 message.getAttributes().length, this.dataProviderId);
         return this;
     }
