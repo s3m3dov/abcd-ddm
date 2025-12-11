@@ -73,7 +73,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		private static final long serialVersionUID = -4025238529984914107L;
 		ActorRef<DependencyWorker.Message> dependencyWorker;
 		ActorRef<LargeMessageProxy.Message> dependencyWorkerLMP;
-        ActorRef<DataProvider.Message> localDataProvider;
+		ActorRef<DataProvider.Message> localDataProvider;
 	}
 
 	@Getter
@@ -122,10 +122,15 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				LargeMessageProxy.create(this.getContext().getSelf().unsafeUpcast(), false),
 				LargeMessageProxy.DEFAULT_NAME);
 
-		this.dependencyWorkers = new ArrayList<>();
+		this.dataProviders = new ArrayList<>();
+		this.dataProviderLMPs = new ArrayList<>();
+		this.dataProvidersActive = new BooleanArrayList();
+		this.dataProvidersOverloaded = new BooleanArrayList();
+
+        this.dependencyWorkers = new ArrayList<>();
 		this.dependencyWorkerLMPs = new ArrayList<>();
-		this.dependencyWorkerActive = new BooleanArrayList();
-		this.dependencyWorkerOverloaded = new BooleanArrayList();
+		this.dependencyWorkersActive = new BooleanArrayList();
+		this.dependencyWorkersOverloaded = new BooleanArrayList();
 
 		context.getSystem().receptionist().tell(Receptionist.register(dependencyMinerService, context.getSelf()));
 	}
@@ -148,19 +153,30 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private final ActorRef<ResultCollector.Message> resultCollector;
 	private final ActorRef<LargeMessageProxy.Message> largeMessageProxy;
 
-	private final List<ActorRef<DependencyWorker.Message>> dependencyWorkers;
-	private final List<ActorRef<LargeMessageProxy.Message>> dependencyWorkerLMPs;
-	private final BooleanList dependencyWorkerActive;
-	private final BooleanList dependencyWorkerOverloaded;
+	// DataProvider tracking (one per worker node)
+	private final List<ActorRef<DataProvider.Message>> dataProviders;
+	private final List<ActorRef<LargeMessageProxy.Message>> dataProviderLMPs;
+	private final BooleanList dataProvidersActive;
+	private final BooleanList dataProvidersOverloaded;
 
+    // DependencyWorker tracking (multiple per worker node)
+    private final List<ActorRef<DependencyWorker.Message>> dependencyWorkers;
+	private final List<ActorRef<LargeMessageProxy.Message>> dependencyWorkerLMPs;
+    private final BooleanList dependencyWorkersActive;
+	private final BooleanList dependencyWorkersOverloaded;
+
+    // Attribute mappings
 	private HashMap<File, int[]> file2attribute;
 	private File[] attribute2file;
 	private String[] attribute2name;
 	private int[] attribute2worker;
+	private int[] attribute2dataProvider; // Maps attribute to DataProvider ID
 
+    // Pending messages
 	private final List<BatchMessage> pendingBatchMessages;
 	private final List<RegistrationMessage> pendingRegistrationMessages;
 
+    // Validation phase state
 	private boolean[][] candidateMatrix;
 	private List<IntList> worker2attributes;
 
@@ -191,7 +207,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	private Behavior<Message> handle(HeaderMessage message) {
 		this.getContext().getLog().info("HeaderMessage! {} active workers",
-				this.dependencyWorkerActive.stream().filter(b -> b).count());
+				this.dataProvidersActive.stream().filter(b -> b).count());
 
 		// Store the received header lines
 		this.headerLines[message.getReaderId()] = message.getHeader();
@@ -228,16 +244,16 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		if (this.dependencyWorkers.isEmpty())
 			return this;
 
-		// Map workers to attributes and start reading
-		this.mapAttributesToWorkers();
+		// Map data providers to attributes and start reading
+		this.mapAttributesToDataProviders();
 		this.startReading();
 
 		return this;
 	}
 
 	private Behavior<Message> handle(BatchMessage message) {
-		this.getContext().getLog().info("BatchMessage! {} active workers",
-				this.dependencyWorkerActive.stream().filter(b -> b).count());
+		this.getContext().getLog().info("BatchMessage! {} active data providers",
+				this.dataProvidersActive.stream().filter(b -> b).count());
 
 		// Close the reading process for this file if the last line was read
 		if (message.getBatch().length == 0) {
@@ -259,7 +275,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		// Wait for more workers to join and steal if any number of workers is
 		// overloaded
-		if (this.dependencyWorkerOverloaded.stream().anyMatch(b -> b)) {
+		if (this.dataProvidersOverloaded.stream().anyMatch(b -> b)) {
 			this.pendingBatchMessages.add(message);
 			return this;
 		}
@@ -270,31 +286,32 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			return this;
 		}
 
-		// Wait for workers to become inactive if one (or more) target workers are
+		// Wait for DataProviders to become inactive if one (or more) target
+		// DataProviders are
 		// currently already active
 		File file = this.inputFiles[message.getReaderId()];
 		String[][] columns = message.getBatch();
 		for (int i = 0; i < columns.length; i++) {
 			int attribute = this.file2attribute.get(file)[i];
-			int workerId = this.attribute2worker[attribute];
-			if (this.dependencyWorkerActive.getBoolean(workerId)) {
+			int dataProviderId = this.attribute2dataProvider[attribute];
+			if (this.dataProvidersActive.getBoolean(dataProviderId)) {
 				this.pendingBatchMessages.add(message);
 				return this;
 			}
 		}
 
-		// Send the columns and set the corresponding workers to active
+		// Send the columns and set the corresponding DataProviders to active
 		for (int i = 0; i < columns.length; i++) {
-			int attribute = this.file2attribute.get(file)[i];
-			int workerId = this.attribute2worker[attribute];
-			int numColumnsForThisWorker = 0;
+			int attributeId = this.file2attribute.get(file)[i];
+			int dataProviderId = this.attribute2dataProvider[attributeId];
+			int numColumnsForThisDataProvider = 0;
 			for (int j = 0; j < columns.length; j++)
-				if (this.attribute2worker[this.file2attribute.get(file)[j]] == workerId)
-					numColumnsForThisWorker++;
+				if (this.attribute2dataProvider[this.file2attribute.get(file)[j]] == dataProviderId)
+					numColumnsForThisDataProvider++;
 
-			this.dependencyWorkers.get(workerId)
-					.tell(new DependencyWorker.DataMessage(attribute, columns[i], numColumnsForThisWorker));
-			this.dependencyWorkerActive.set(workerId, true);
+			this.dataProviders.get(dataProviderId)
+					.tell(new DataProvider.DataMessage(attributeId, columns[i], numColumnsForThisDataProvider));
+			this.dataProvidersActive.set(dataProviderId, true);
 		}
 
 		// Read the next batch from the input reader whose batch we just forwarded
@@ -305,15 +322,16 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	}
 
 	private Behavior<Message> handle(StatusMessage message) {
-		this.getContext().getLog().info("StatusMessage! {} active workers",
-				this.dependencyWorkerActive.stream().filter(b -> b).count());
+		this.getContext().getLog().info("StatusMessage! {} active DataProviders",
+				this.dataProvidersActive.stream().filter(b -> b).count());
 
-		this.dependencyWorkerActive.set(message.getWorkerId(), message.isActive());
-		this.dependencyWorkerOverloaded.set(message.getWorkerId(), message.isOverloaded());
+		this.dataProvidersActive.set(message.getDataProviderId(), message.isActive());
+		this.dataProvidersOverloaded.set(message.getDataProviderId(), message.isOverloaded());
 
 		// Check if we are already in validation phase; in that case, StatusMessages are
 		// irrelevant, but we might still
-		// need to initiate the validation phase, if this was the last active worker
+		// need to initiate the validation phase, if this was the last active
+		// DataProvider
 		if (this.isValidationPhase())
 			this.initiateValidationPhase();
 
@@ -334,25 +352,22 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		return this;
 	}
 
-	private void registerNewWorker(ActorRef<DependencyWorker.Message> dependencyWorker,
-			ActorRef<LargeMessageProxy.Message> dependencyWorkerLMP) {
-		this.dependencyWorkers.add(dependencyWorker);
-		this.dependencyWorkerLMPs.add(dependencyWorkerLMP);
-		this.getContext().watch(dependencyWorker);
-		this.dependencyWorkerActive.add(false);
-		this.dependencyWorkerOverloaded.add(false);
-	}
-
 	private Behavior<Message> handle(RegistrationMessage message) {
 		this.getContext().getLog().info("RegistrationMessage! {} active workers",
-				this.dependencyWorkerActive.stream().filter(b -> b).count());
+				this.dataProvidersActive.stream().filter(b -> b).count());
 
 		ActorRef<DependencyWorker.Message> dependencyWorker = message.getDependencyWorker();
 		ActorRef<LargeMessageProxy.Message> dependencyWorkerLMP = message.getDependencyWorkerLMP();
+		ActorRef<DataProvider.Message> dataProvider = message.getLocalDataProvider();
 
 		// Ignore the message if we already know this worker
 		if (this.dependencyWorkers.contains(dependencyWorker))
 			return this;
+
+		// Register DataProvider if not already registered (multiple workers per node)
+		if (!this.dataProviders.contains(dataProvider)) {
+			this.registerNewDataProvider(dataProvider, dependencyWorkerLMP);
+		}
 
 		// Accept the registration and simply wait if we are still in the header phase;
 		// work has not been assigned to workers yet
@@ -368,18 +383,20 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			if (this.dependencyWorkers.isEmpty()) {
 				this.registerNewWorker(dependencyWorker, dependencyWorkerLMP);
 
-				this.mapAttributesToWorkers();
+				this.mapAttributesToDataProviders();
 				this.startReading();
 				return this;
 			}
 
-			// Accept the registration and let the worker steal columns, if all workers are
+			// Accept the registration and let the DataProvider steal columns, if all
+			// DataProviders are
 			// available i.e. no batches are being processed or stolen
-			if (this.dependencyWorkerActive.stream().noneMatch(b -> b)) {
+			if (this.dataProvidersActive.stream().noneMatch(b -> b)) {
 				this.registerNewWorker(dependencyWorker, dependencyWorkerLMP);
 
-				this.stealAttributesTo(dependencyWorker, this.dependencyWorkers.indexOf(dependencyWorker),
-						dependencyWorkerLMP);
+				// Get the DataProvider ID (same as last registered since we just added it)
+				int dataProviderId = this.dataProviders.indexOf(dataProvider);
+				this.stealAttributesTo(dataProvider, dataProviderId, dependencyWorkerLMP);
 				return this;
 			}
 		}
@@ -444,15 +461,15 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		// Set the worker to inactive, because no further validation work could be found
 		// for its attributes
-		this.dependencyWorkerActive.set(workerId, false);
+		this.dependencyWorkersActive.set(workerId, false);
 
 		// End the program when
-        // all INDs have been checked, which means all workers are inactive now
-		if (this.dependencyWorkerActive.stream().noneMatch(b -> b)) {
-            this.resultCollector.tell(new ResultCollector.FinalizeMessage());
-            long discoveryTime = System.currentTimeMillis() - this.startTime;
-            this.getContext().getLog().info("Finished mining within {} ms!", discoveryTime);
-        }
+		// all INDs have been checked, which means all workers are inactive now
+		if (this.dependencyWorkersActive.stream().noneMatch(b -> b)) {
+			this.resultCollector.tell(new ResultCollector.FinalizeMessage());
+			long discoveryTime = System.currentTimeMillis() - this.startTime;
+			this.getContext().getLog().info("Finished mining within {} ms!", discoveryTime);
+		}
 		return this;
 	}
 
@@ -462,12 +479,12 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		return this;
 	}
 
-    /////////////////
-    // Actor Utils //
-    /////////////////
+	/////////////////
+	// Actor Utils //
+	/////////////////
 
-    // * PHASE CHECKS * //
-    private boolean isHeaderPhase() {
+	// * PHASE CHECKS * //
+	private boolean isHeaderPhase() {
 		// The header phase lasts as long as header lines are still missing
 		return Arrays.stream(this.headerLines).anyMatch(Objects::isNull);
 	}
@@ -485,16 +502,44 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		return !this.isBatchPhase();
 	}
 
-    // * MAPPING & READING * //
-    private void mapAttributesToWorkers() {
-		int numWorkers = this.dependencyWorkers.size();
+    // * REGISTRATION * //
+    private void registerNewWorker(ActorRef<DependencyWorker.Message> dependencyWorker,
+			ActorRef<LargeMessageProxy.Message> dependencyWorkerLMP) {
+		this.dependencyWorkers.add(dependencyWorker);
+		this.dependencyWorkerLMPs.add(dependencyWorkerLMP);
+		this.getContext().watch(dependencyWorker);
+		this.dependencyWorkersActive.add(false);
+		this.dependencyWorkersOverloaded.add(false);
+	}
+
+	private void registerNewDataProvider(ActorRef<DataProvider.Message> dataProvider,
+			ActorRef<LargeMessageProxy.Message> dataProviderLMP) {
+		this.dataProviders.add(dataProvider);
+		this.dataProviderLMPs.add(dataProviderLMP);
+		this.dataProvidersActive.add(false);
+		this.dataProvidersOverloaded.add(false);
+
+		// DataProvider ID is its index in the list
+		int dataProviderId = this.dataProviders.size() - 1;
+
+		this.getContext().getLog().info("Registered DataProvider {} at {}",
+				dataProviderId, dataProvider.path());
+	}
+
+	// * MAPPING & READING * //
+	private void mapAttributesToDataProviders() {
+		int numDataProviders = this.dataProviders.size();
 		int numAttributes = this.attribute2name.length;
 
-		// Assign attributes to workers with a round-robin strategy so that long and
-		// short columns are assigned approximately evenly to workers
-		this.attribute2worker = new int[numAttributes];
+		// Assign attributes to DataProviders with a round-robin strategy so that long
+		// and
+		// short columns are assigned approximately evenly to DataProviders
+		this.attribute2dataProvider = new int[numAttributes];
 		for (int attribute = 0; attribute < numAttributes; attribute++)
-			this.attribute2worker[attribute] = attribute % numWorkers;
+			this.attribute2dataProvider[attribute] = attribute % numDataProviders;
+
+		this.getContext().getLog().info("Mapped {} attributes to {} DataProviders",
+				numAttributes, numDataProviders);
 	}
 
 	private void startReading() {
@@ -502,49 +547,51 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		for (ActorRef<InputReader.Message> inputReader : this.inputReaders)
 			inputReader.tell(new InputReader.ReadBatchMessage(this.getContext().getSelf(), batchSize));
 
-		// Inform the dependency workers about their initial responsibilities
-		for (int workerId = 0; workerId < this.dependencyWorkers.size(); workerId++) {
+		// Inform the DataProviders about their initial responsibilities
+		for (int dataProviderId = 0; dataProviderId < this.dataProviders.size(); dataProviderId++) {
 			IntArrayList attributes = new IntArrayList();
-			for (int attribute = 0; attribute < this.attribute2worker.length; attribute++)
-				if (this.attribute2worker[attribute] == workerId)
+			for (int attribute = 0; attribute < this.attribute2dataProvider.length; attribute++)
+				if (this.attribute2dataProvider[attribute] == dataProviderId)
 					attributes.add(attribute);
 
-			this.dependencyWorkers.get(workerId)
-					.tell(new DependencyWorker.InitialAttributesMessage(attributes.toArray(new int[0]), workerId));
-			this.dependencyWorkerActive.set(workerId, true);
+			this.dataProviders.get(dataProviderId)
+					.tell(new DataProvider.SetIdAndAttributesMessage(dataProviderId, attributes.toArray(new int[0])));
+			this.dataProvidersActive.set(dataProviderId, true);
 		}
 	}
 
-    // * STEALING * //
-    private void stealAttributesTo(ActorRef<DependencyWorker.Message> worker, int workerId,
-			ActorRef<LargeMessageProxy.Message> workerLMP) {
-		// Find attributes to steal; we aim to steal evenly from the workers with the
+	// * STEALING * //
+	private void stealAttributesTo(ActorRef<DataProvider.Message> dataProvider, int dataProviderId, ActorRef<LargeMessageProxy.Message> dataProviderLMP) {
+		// Find attributes to steal; we aim to steal evenly from the DataProviders with
+		// the
 		// most partitions (this is a very simple stealing approach)
 		IntSet attributesToSteal = new IntAVLTreeSet();
-		int numWorkers = this.dependencyWorkers.size();
+		int numDataProviders = this.dataProviders.size();
 		int numAttributes = this.attribute2name.length;
-		int numAttributesToSteal = (int) Math.floor((double) numAttributes / numWorkers);
+		int numAttributesToSteal = (int) Math.floor((double) numAttributes / numDataProviders);
 
-		int[] attributesPerWorkerCounts = new int[numWorkers];
-		for (int wId : this.attribute2worker)
-			attributesPerWorkerCounts[wId] += 1;
+		int[] attributesPerDataProviderCounts = new int[numDataProviders];
+		for (int dpId : this.attribute2dataProvider)
+			attributesPerDataProviderCounts[dpId] += 1;
 
 		Random random = new Random();
 		while (attributesToSteal.size() < numAttributesToSteal) {
-			// Find worker with the currently most partitions
-			int workerWithHighestCount = 0;
-			int highestCount = attributesPerWorkerCounts[0];
-			for (int i = 1; i < numWorkers; i++) {
-				if (attributesPerWorkerCounts[i] > highestCount) {
-					workerWithHighestCount = i;
-					highestCount = attributesPerWorkerCounts[i];
+			// Find DataProvider with the currently most partitions
+			int dataProviderWithHighestCount = 0;
+			int highestCount = attributesPerDataProviderCounts[0];
+			for (int i = 1; i < numDataProviders; i++) {
+				if (attributesPerDataProviderCounts[i] > highestCount) {
+					dataProviderWithHighestCount = i;
+					highestCount = attributesPerDataProviderCounts[i];
 				}
 			}
 
-			// Steal one random partition from the worker with the currently most partitions
+			// Steal one random partition from the DataProvider with the currently most
+			// partitions
 			int randomPartitionNumber = random.nextInt(highestCount) + 1;
-			for (int i = 0; i < this.attribute2worker.length; i++) {
-				if ((this.attribute2worker[i] == workerWithHighestCount) && (!attributesToSteal.contains(i))) {
+			for (int i = 0; i < this.attribute2dataProvider.length; i++) {
+				if ((this.attribute2dataProvider[i] == dataProviderWithHighestCount)
+						&& (!attributesToSteal.contains(i))) {
 					randomPartitionNumber--;
 					if (randomPartitionNumber == 0) {
 						attributesToSteal.add(i);
@@ -552,41 +599,43 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 					}
 				}
 			}
-			attributesPerWorkerCounts[workerWithHighestCount] -= 1;
+			attributesPerDataProviderCounts[dataProviderWithHighestCount] -= 1;
 		}
 
-		// Collect the stolen attributes for every worker that needs to send stolen
-		// attributes to the new worker and reassign stolen attributes
-		Int2ObjectMap<IntArrayList> worker2stolenAttributes = new Int2ObjectArrayMap<>(this.dependencyWorkers.size());
+		// Collect the stolen attributes for every DataProvider that needs to send
+		// stolen
+		// attributes to the new DataProvider and reassign stolen attributes
+		Int2ObjectMap<IntArrayList> dataProvider2stolenAttributes = new Int2ObjectArrayMap<>(this.dataProviders.size());
 		for (int attribute : attributesToSteal) {
-			int bestolenWorkerId = this.attribute2worker[attribute];
-			if (!worker2stolenAttributes.containsKey(bestolenWorkerId))
-				worker2stolenAttributes.put(bestolenWorkerId, new IntArrayList());
-			worker2stolenAttributes.get(bestolenWorkerId).add(attribute);
+			int sourceDataProviderId = this.attribute2dataProvider[attribute];
+			if (!dataProvider2stolenAttributes.containsKey(sourceDataProviderId)) {
+				dataProvider2stolenAttributes.put(sourceDataProviderId, new IntArrayList());
 
-			this.attribute2worker[attribute] = workerId;
+            }
+			dataProvider2stolenAttributes.get(sourceDataProviderId).add(attribute);
+			this.attribute2dataProvider[attribute] = dataProviderId;
 		}
 
 		// Send the MoveDataMessages to start the stealing process
-		for (Int2ObjectMap.Entry<IntArrayList> entry : worker2stolenAttributes.int2ObjectEntrySet()) {
+		for (Int2ObjectMap.Entry<IntArrayList> entry : dataProvider2stolenAttributes.int2ObjectEntrySet()) {
 			int[] attributes = entry.getValue().toArray(new int[0]);
-			int bestolenWorkerId = entry.getIntKey();
-			DependencyWorker.MoveDataMessage moveDataMessage = new DependencyWorker.MoveDataMessage(
-					attributes, worker, workerId, workerLMP, worker2stolenAttributes.size());
-			this.dependencyWorkers.get(bestolenWorkerId).tell(moveDataMessage);
-			this.dependencyWorkerActive.set(bestolenWorkerId, true);
+			int sourceDataProviderId = entry.getIntKey();
+			DataProvider.MoveDataMessage moveDataMessage = new DataProvider.MoveDataMessage(
+					attributes, dataProviderId, dataProvider, dataProviderLMP, dataProvider2stolenAttributes.size());
+			this.dataProviders.get(sourceDataProviderId).tell(moveDataMessage);
+			this.dataProvidersActive.set(sourceDataProviderId, true);
 		}
-		this.dependencyWorkerActive.set(workerId, true);
+		this.dataProvidersActive.set(dataProviderId, true);
 	}
 
-    // * VALIDATION PHASE * //
+	// * VALIDATION PHASE * //
 	private void initiateValidationPhase() {
 		int numAttributes = this.attribute2name.length;
 		int numWorkers = this.dependencyWorkers.size();
 
 		// Check that all workers are inactive; otherwise, we wait for a status update
 		// of a still active worker to initiate the validation phase
-		if (this.dependencyWorkerActive.stream().anyMatch(b -> b))
+		if (this.dependencyWorkersActive.stream().anyMatch(b -> b))
 			return;
 
 		// Create an IND candidate matrix to keep track of the candidate validations
@@ -616,7 +665,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				}
 			}
 
-			this.dependencyWorkerActive.set(workerId, true);
+			this.dependencyWorkersActive.set(workerId, true);
 		}
 	}
 
