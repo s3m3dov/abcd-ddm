@@ -477,6 +477,13 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		if (this.dependencyWorkers.contains(dependencyWorker))
 			return this;
 
+		// If the local DataProvider isn't registered yet, add to pending
+		if (!this.dataProviders.contains(localDataProvider)) {
+			this.pendingWorkerRegistrations.add(message);
+			this.getContext().getLog().info("Added Worker to pending, waiting for DataProvider registration");
+			return this;
+		}
+
 		// Register the worker with its co-located DataProvider
 		this.registerNewWorker(dependencyWorker, dependencyWorkerLMP, localDataProvider);
 
@@ -660,6 +667,16 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 		this.pendingDataProviderRegistrations.clear();
 
+		// Process pending worker registrations (workers that arrived before their
+		// DataProvider)
+		if (!this.pendingWorkerRegistrations.isEmpty()) {
+			this.getContext().getLog().info("Processing {} pending worker registrations",
+					this.pendingWorkerRegistrations.size());
+			for (DependencyWorkerRegistrationMessage registrationMessage : this.pendingWorkerRegistrations)
+				this.getContext().getSelf().tell(registrationMessage);
+			this.pendingWorkerRegistrations.clear();
+		}
+
 		this.isRebalancing = true;
 		this.getContext().getLog().info("Rebalancing in progress, batches will be delayed");
 	}
@@ -681,10 +698,10 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		for (int dpId : this.attribute2dataProvider)
 			attributesPerDataProviderCounts[dpId] += 1;
 
-        // Log detailed attribute distribution BEFORE and AFTER rebalancing
+		// Log detailed attribute distribution BEFORE and AFTER rebalancing
 		logAttributeDistribution("BEFORE rebalancing", attributesPerDataProviderCounts);
 
-        // Steal attributes
+		// Steal attributes
 		Random random = new Random();
 		while (attributesToSteal.size() < numAttributesToSteal) {
 			// Find DataProvider with the currently most partitions
@@ -746,6 +763,18 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		this.getContext().getLog().info("Rebalancing involves {} DataProviders",
 				this.rebalancingDataProviderIds.size());
+
+		// Inform the new DataProvider of its ID and assigned attributes
+		IntArrayList targetAttributes = new IntArrayList();
+		for (int attribute = 0; attribute < this.attribute2dataProvider.length; attribute++) {
+			if (this.attribute2dataProvider[attribute] == targetDataProviderId) {
+				targetAttributes.add(attribute);
+			}
+		}
+		targetDataProvider.tell(new DataProvider.SetIdAndAttributesMessage(
+				targetDataProviderId, targetAttributes.toArray(new int[0])));
+		this.getContext().getLog().info("Informed DataProvider-{} of {} assigned attributes",
+				targetDataProviderId, targetAttributes.size());
 
 		// Calculate AFTER distribution
 		int[] attributeCountsAfter = new int[this.dataProviders.size()];
