@@ -127,7 +127,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		if (!dependencyMiners.isEmpty() && (this.dependencyMiner == null)) {
 			this.dependencyMiner = dependencyMiners.iterator().next();
 			this.dependencyMiner
-					.tell(new DependencyMiner.RegistrationMessage(
+					.tell(new DependencyMiner.DependencyWorkerRegistrationMessage(
 							this.getContext().getSelf(),
 							this.largeMessageProxy,
 							this.localDataProvider)); // Include DataProvider reference
