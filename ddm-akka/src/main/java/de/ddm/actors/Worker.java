@@ -16,66 +16,69 @@ import lombok.NoArgsConstructor;
 
 public class Worker extends AbstractBehavior<Worker.Message> {
 
-	////////////////////
-	// Actor Messages //
-	////////////////////
+    ////////////////////
+    // Actor Messages //
+    ////////////////////
 
-	public interface Message extends AkkaSerializable {
-	}
+    public interface Message extends AkkaSerializable {
+    }
 
-	@NoArgsConstructor
-	public static class ShutdownMessage implements Message {
-		private static final long serialVersionUID = 7516129288777469221L;
-	}
+    @NoArgsConstructor
+    public static class ShutdownMessage implements Message {
+        private static final long serialVersionUID = 7516129288777469221L;
+    }
 
-	////////////////////////
-	// Actor Construction //
-	////////////////////////
+    ////////////////////////
+    // Actor Construction //
+    ////////////////////////
 
-	public static final String DEFAULT_NAME = "worker";
+    public static final String DEFAULT_NAME = "worker";
 
-	public static Behavior<Message> create() {
-		return Behaviors.setup(Worker::new);
-	}
+    public static Behavior<Message> create() {
+        return Behaviors.setup(Worker::new);
+    }
 
-	private Worker(ActorContext<Message> context) {
-		super(context);
-		Reaper.watchWithDefaultReaper(this.getContext().getSelf());
+    private Worker(ActorContext<Message> context) {
+        super(context);
+        Reaper.watchWithDefaultReaper(this.getContext().getSelf());
 
-		// Spawn DataProvider BEFORE DependencyWorker to ensure it's available
-		// It registers itself with Receptionist for service discovery
-		this.dataProvider = context.spawn(
-				DataProvider.create(),
-				DataProvider.DEFAULT_NAME);
-		context.getLog().info("DataProvider spawned");
 
-		final int numWorkers = SystemConfigurationSingleton.get().getNumWorkers();
-		if (numWorkers > 0)
-			this.dependencyWorker = context.spawn(
-					DependencyWorker.create(this.dataProvider), // Pass DataProvider reference
-					DependencyWorker.DEFAULT_NAME,
-					DispatcherSelector.fromConfig("akka.worker-pinned-dispatcher"));
-	}
+        final int numWorkers = SystemConfigurationSingleton.get().getNumWorkers();
+        if (numWorkers > 0) {
+            // Spawn DataProvider BEFORE DependencyWorker to ensure it's available
+            this.dataProvider = context.spawn(
+                    DataProvider.create(),
+                    DataProvider.DEFAULT_NAME);
+            context.getLog().info("DataProvider spawned");
 
-	/////////////////
-	// Actor State //
-	/////////////////
+            this.dependencyWorker = context.spawn(
+                    DependencyWorker.create(this.dataProvider), // Pass DataProvider reference
+                    DependencyWorker.DEFAULT_NAME,
+                    DispatcherSelector.fromConfig("akka.worker-pinned-dispatcher"));
 
-	private ActorRef<DataProvider.Message> dataProvider;
-	private ActorRef<DependencyWorker.Message> dependencyWorker;
+        }
 
-	////////////////////
-	// Actor Behavior //
-	////////////////////
+    }
 
-	@Override
-	public Receive<Message> createReceive() {
-		return newReceiveBuilder()
-				.onMessage(ShutdownMessage.class, this::handle)
-				.build();
-	}
+    /////////////////
+    // Actor State //
+    /////////////////
 
-	private Behavior<Message> handle(ShutdownMessage message) {
-		return Behaviors.stopped();
-	}
+    private ActorRef<DataProvider.Message> dataProvider;
+    private ActorRef<DependencyWorker.Message> dependencyWorker;
+
+    ////////////////////
+    // Actor Behavior //
+    ////////////////////
+
+    @Override
+    public Receive<Message> createReceive() {
+        return newReceiveBuilder()
+                .onMessage(ShutdownMessage.class, this::handle)
+                .build();
+    }
+
+    private Behavior<Message> handle(ShutdownMessage message) {
+        return Behaviors.stopped();
+    }
 }
