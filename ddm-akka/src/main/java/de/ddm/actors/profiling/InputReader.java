@@ -67,6 +67,10 @@ public class InputReader extends AbstractBehavior<InputReader.Message> {
 
 		if (InputConfigurationSingleton.get().isFileHasHeader())
 			this.reader.readNext();
+
+		// Log file information immediately - no need to store inputFile
+		context.getLog().info("InputReader-{} initialized | File: {} | Columns: {} | Headers: [{}]",
+				id, inputFile.getName(), this.header.length, String.join(", ", this.header));
 	}
 
 	/////////////////
