@@ -99,7 +99,8 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     /**
-     * Welcome Message from DependencyMiner to set up the DataProvider with its ID and managed attributes
+     * Welcome Message from DependencyMiner to set up the DataProvider with its ID
+     * and managed attributes
      */
     @Getter
     @NoArgsConstructor
@@ -137,7 +138,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 LargeMessageProxy.create(context.getSelf().unsafeUpcast(), false),
                 LargeMessageProxy.DEFAULT_NAME);
 
-        // dataProviderId will be set when we receive the first message or during registration
+        // dataProviderId will be set during SetIdAndAttributesMessage
         this.dataProviderId = -1;
 
         // dependencyMiner will be discovered via Receptionist
@@ -168,8 +169,11 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     private long valueCount; // Total unique value count across all managed columns
     private double avgValueSizeInBytes;
     private int receivedBatchCount = 0;
-    // Maps attribute ID to its column data
+
+    // Maps attribute ID to its column data (loading phase)
     private Int2ObjectMap<Set<String>> columns;
+    // Maps attribute ID to sorted column data (validation phase)
+    private Int2ObjectMap<List<String>> sortedColumns;
 
     // Actor references
     private ActorRef<LargeMessageProxy.Message> largeMessageProxy;
@@ -262,7 +266,8 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         // Send columns to target worker
         LargeMessageProxy.LargeMessage acceptDataMessage = new AcceptDataMessage(stolenColumns,
                 message.getExpectedMoveCount(), message.getToDataProviderId());
-        this.largeMessageProxy.tell(new LargeMessageProxy.SendMessage(acceptDataMessage, message.getToDataProviderLMP()));
+        this.largeMessageProxy
+                .tell(new LargeMessageProxy.SendMessage(acceptDataMessage, message.getToDataProviderLMP()));
 
         this.reportStatus();
         return this;
@@ -295,7 +300,9 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
 
     private Behavior<Message> handle(RequestColumnMessage message) {
 
-        Set<String> columnData = this.columns.get(message.getAttributeId());
+        Set<String> columnData = this.sortedColumns != null
+                ? new HashSet<>(this.sortedColumns.get(message.getAttributeId())) // Validation phase - return sorted
+                : this.columns.get(message.getAttributeId()); // Loading phase - return unsorted
 
         if (columnData == null) {
             this.getContext().getLog().warn("Column data not found for attribute {}",
@@ -312,6 +319,33 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     // Actor Utils //
     /////////////////
 
+    /**
+     * Transition from loading phase to validation phase by sorting columns
+     */
+    public void transitionToValidationPhase() {
+        if (this.sortedColumns != null)
+            return; // Already transitioned
+
+        this.getContext().getLog().info("DataProvider transitioning to validation phase");
+        this.sortColumns();
+    }
+
+    private void sortColumns() {
+        this.sortedColumns = new Int2ObjectArrayMap<>(this.columns.size());
+        IntList attributes = new IntArrayList(this.columns.keySet());
+        for (int attribute : attributes) {
+            Set<String> column = this.columns.remove(attribute);
+            List<String> sortedColumn = new ArrayList<>(column);
+            Collections.sort(sortedColumn);
+            this.sortedColumns.put(attribute, sortedColumn);
+        }
+        this.columns = null; // Free memory from loading phase
+    }
+
+
+    /**
+     * Report current memory status to DependencyMiner
+     */
     private void reportStatus() {
         // Calculate memory exhaustion
         boolean overloaded = this.availableMemory < this.usedMemoryPredicted;
@@ -323,6 +357,9 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 this.availableMemory / 1024 / 1024, this.usedMemoryPredicted / 1024 / 1024);
     }
 
+    /**
+     * Update memory usage measurements and predictions
+     */
     private void updateMemoryUsage() {
         // Skip any memory measurement if the value count is and always was small
         if ((this.valueCount < VALUE_COUNT_BEFORE_MEMORY_MEASUREMENT) && (this.usedMemoryMeasured == 0))
