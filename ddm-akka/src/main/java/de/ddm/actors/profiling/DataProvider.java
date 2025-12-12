@@ -111,6 +111,19 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         int[] attributes;
     }
 
+    /**
+     * Debug message to provide information about the data this DataProvider manages
+     */
+    @Getter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class DataInfoDebugMessage implements Message {
+        private static final long serialVersionUID = -1234567890123456L;
+        int dataProviderId;
+        int[] attributes;
+        String[] attributeNames;
+    }
+
     ////////////////////////
     // Actor Construction //
     ////////////////////////
@@ -193,6 +206,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 .onMessage(MoveDataMessage.class, this::handle)
                 .onMessage(AcceptDataMessage.class, this::handle)
                 .onMessage(RequestColumnMessage.class, this::handle)
+                .onMessage(DataInfoDebugMessage.class, this::handle)
                 .build();
     }
 
@@ -321,6 +335,31 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
 
         message.getReplyTo().tell(new ResponseColumnMessage(message.getAttributeId(), columnData));
 
+        return this;
+    }
+
+    private Behavior<Message> handle(DataInfoDebugMessage message) {
+        this.getContext().getLog().info("========== DEBUG INFO FOR DATAPROVIDER-{} ==========",
+                message.getDataProviderId());
+        this.getContext().getLog().info("Assigned Attributes: {}", Arrays.toString(message.getAttributes()));
+        this.getContext().getLog().info("Attribute Names: {}", Arrays.toString(message.getAttributeNames()));
+
+        // Log current data state
+        this.getContext().getLog().info("Total managed columns: {}", this.columns != null ? this.columns.size() : 0);
+        this.getContext().getLog().info("Total unique values: {}", this.valueCount);
+        this.getContext().getLog().info("Memory usage: {} MB / {} MB",
+                this.usedMemoryPredicted / 1024 / 1024,
+                this.availableMemory / 1024 / 1024);
+
+        // Log detailed column information
+        if (this.columns != null) {
+            for (Int2ObjectMap.Entry<Set<String>> entry : this.columns.int2ObjectEntrySet()) {
+                this.getContext().getLog().info("  Attribute {}: {} unique values",
+                        entry.getIntKey(), entry.getValue().size());
+            }
+        }
+
+        this.getContext().getLog().info("=====================================================");
         return this;
     }
 

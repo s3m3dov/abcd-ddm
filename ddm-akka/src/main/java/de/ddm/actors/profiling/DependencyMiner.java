@@ -283,11 +283,16 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 			if (this.isValidationPhase()) {
 				// Log the result of the data reading process
-                this.getContext().getLog()
-                        .info("Reading data completed in {}ms", System.currentTimeMillis() - this.startTime);
-				for (int attribute = 0; attribute < this.attribute2worker.length; attribute++)
-                    this.getContext().getLog()
-                            .info("Attribute {} is on worker {}", attribute, this.attribute2worker[attribute]);
+				this.getContext().getLog().info("Reading data completed in {}ms", System.currentTimeMillis() - this.startTime);
+				// Output current DependencyMiner information for debugging
+				this.outputDebugInformation();
+				// Send debug info to each DataProvider
+				this.requestDebugInfoFromDataProviders();
+
+                // Prepare for validation phase
+                for (int attribute = 0; attribute < this.attribute2worker.length; attribute++)
+					this.getContext().getLog()
+							.info("Attribute {} is on worker {}", attribute, this.attribute2worker[attribute]);
 
 				// Attempt to initiate the validation phase
 				this.initiateValidationPhase();
@@ -802,6 +807,97 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			}
 
 			this.dependencyWorkersActive.set(workerId, true);
+		}
+	}
+
+	// * DEBUG OUTPUT * //
+	/**
+	 * Output comprehensive debug information about DependencyMiner's current state
+	 */
+	private void outputDebugInformation() {
+		this.getContext().getLog().info("========== DEPENDENCYMINER DEBUG INFORMATION ==========");
+
+		// Log file and attribute information
+		this.getContext().getLog().info("Input Files: {}", Arrays.toString(this.inputFiles));
+		this.getContext().getLog().info("Total Attributes: {}",
+				this.attribute2name != null ? this.attribute2name.length : 0);
+
+		// Log attribute details
+		if (this.attribute2name != null) {
+			for (int i = 0; i < this.attribute2name.length; i++) {
+				this.getContext().getLog().info("  Attribute {}: {} from file {}",
+						i, this.attribute2name[i], this.attribute2file[i].getName());
+			}
+		}
+
+		// Log DataProvider information
+		this.getContext().getLog().info("Total DataProviders: {}", this.dataProviders.size());
+		for (int dpId = 0; dpId < this.dataProviders.size(); dpId++) {
+			IntList attributeIds = new IntArrayList();
+			if (this.attribute2dataProvider != null) {
+				for (int attribute = 0; attribute < this.attribute2dataProvider.length; attribute++) {
+					if (this.attribute2dataProvider[attribute] == dpId) {
+						attributeIds.add(attribute);
+					}
+				}
+			}
+			this.getContext().getLog().info("  DataProvider-{}: {} attributes -> {}",
+					dpId, attributeIds.size(), attributeIds);
+		}
+
+		// Log DependencyWorker information
+		this.getContext().getLog().info("Total DependencyWorkers: {}", this.dependencyWorkers.size());
+		for (int workerId = 0; workerId < this.dependencyWorkers.size(); workerId++) {
+			IntList attributeIds = new IntArrayList();
+			if (this.attribute2worker != null) {
+				for (int attribute = 0; attribute < this.attribute2worker.length; attribute++) {
+					if (this.attribute2worker[attribute] == workerId) {
+						attributeIds.add(attribute);
+					}
+				}
+			}
+			this.getContext().getLog().info("  Worker-{}: {} attributes -> {}",
+					workerId, attributeIds.size(), attributeIds);
+		}
+
+		// Log co-location mapping
+		this.getContext().getLog().info("DataProvider to Workers co-location mapping:");
+		for (Map.Entry<Integer, List<Integer>> entry : this.dataProvider2workers.entrySet()) {
+			this.getContext().getLog().info("  DataProvider-{} -> Workers: {}",
+					entry.getKey(), entry.getValue());
+		}
+
+		this.getContext().getLog().info("======================================================");
+	}
+
+	/**
+	 * Send debug information to each DataProvider
+	 */
+	private void requestDebugInfoFromDataProviders() {
+		this.getContext().getLog().info("Sending debug information to all DataProviders...");
+
+		for (int dpId = 0; dpId < this.dataProviders.size(); dpId++) {
+			// Collect attributes for this DataProvider
+			IntList attributeIds = new IntArrayList();
+			List<String> attributeNames = new ArrayList<>();
+
+			if (this.attribute2dataProvider != null) {
+				for (int attribute = 0; attribute < this.attribute2dataProvider.length; attribute++) {
+					if (this.attribute2dataProvider[attribute] == dpId) {
+						attributeIds.add(attribute);
+						attributeNames.add(this.attribute2name[attribute]);
+					}
+				}
+			}
+
+			// Send debug message
+			DataProvider.DataInfoDebugMessage debugMsg = new DataProvider.DataInfoDebugMessage(
+					dpId,
+					attributeIds.toIntArray(),
+					attributeNames.toArray(new String[0]));
+
+			this.dataProviders.get(dpId).tell(debugMsg);
+			this.getContext().getLog().info("Sent debug info to DataProvider-{}", dpId);
 		}
 	}
 
