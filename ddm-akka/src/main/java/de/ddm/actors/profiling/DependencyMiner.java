@@ -292,11 +292,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				// Send debug info to each DataProvider
 				this.requestDebugInfoFromDataProviders();
 
-				// Prepare for validation phase
-				for (int attribute = 0; attribute < this.attribute2worker.length; attribute++)
-					this.getContext().getLog()
-							.info("Attribute {} is on worker {}", attribute, this.attribute2worker[attribute]);
-
 				// Attempt to initiate the validation phase
 				this.initiateValidationPhase();
 			}
@@ -643,6 +638,52 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				numAttributes, numDataProviders);
 	}
 
+	/**
+	 * Map attributes to workers considering locality.
+	 * Each attribute is assigned to a worker co-located with the DataProvider that
+	 * holds the data.
+	 */
+	private void mapAttributesToWorkers() {
+		int numAttributes = this.attribute2name.length;
+		int numWorkers = this.dependencyWorkers.size();
+
+		this.attribute2worker = new int[numAttributes];
+
+		// For each attribute, find which DataProvider holds it,
+		// then assign it to one of the workers co-located with that DataProvider
+		for (int attribute = 0; attribute < numAttributes; attribute++) {
+			int dataProviderId = this.attribute2dataProvider[attribute];
+
+			// Get the list of workers co-located with this DataProvider
+			List<Integer> colocatedWorkers = this.dataProvider2workers.get(dataProviderId);
+
+			if (colocatedWorkers == null || colocatedWorkers.isEmpty()) {
+				// In case no co-located workers, use round-robin across all workers (should not happen)
+				this.getContext().getLog().warn(
+						"No co-located workers found for DataProvider-{}, using round-robin for attribute {}",
+						dataProviderId, attribute);
+				this.attribute2worker[attribute] = attribute % numWorkers;
+			} else {
+				// Assign to one of the co-located workers using round-robin within the group
+				int workerIndex = attribute % colocatedWorkers.size();
+				this.attribute2worker[attribute] = colocatedWorkers.get(workerIndex);
+			}
+		}
+
+		this.getContext().getLog().info("Mapped {} attributes to {} workers (locality-aware)",
+				numAttributes, numWorkers);
+
+		// Log the distribution
+		int[] workerAttributeCounts = new int[numWorkers];
+		for (int attribute = 0; attribute < numAttributes; attribute++) {
+			workerAttributeCounts[this.attribute2worker[attribute]]++;
+		}
+		for (int workerId = 0; workerId < numWorkers; workerId++) {
+			this.getContext().getLog().info("Worker-{} assigned {} attributes",
+					workerId, workerAttributeCounts[workerId]);
+		}
+	}
+
 	private void startReading() {
 		// Initiate reading of the first batches
 		for (ActorRef<InputReader.Message> inputReader : this.inputReaders)
@@ -809,6 +850,10 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		if (this.dependencyWorkersActive.stream().anyMatch(b -> b))
 			return;
 
+		// Initialize attribute-to-worker mapping considering locality
+		// Assign attributes to workers co-located with their DataProvider
+		this.mapAttributesToWorkers();
+
 		// Create an IND candidate matrix to keep track of the candidate validations
 		this.candidateMatrix = new boolean[numAttributes][];
 		for (int i = 0; i < numAttributes; i++)
@@ -845,7 +890,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	 * Output comprehensive debug information about DependencyMiner's current state
 	 */
 	private void outputDebugInformation() {
-		this.getContext().getLog().info("========== DEPENDENCYMINER DEBUG INFORMATION ==========");
+		this.getContext().getLog().info("========== DEPENDENCY MINER DEBUG INFORMATION ==========");
 
 		// Log file and attribute information
 		this.getContext().getLog().info("Input Files: {}", Arrays.toString(this.inputFiles));
