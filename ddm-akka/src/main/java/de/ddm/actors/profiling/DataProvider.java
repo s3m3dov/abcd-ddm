@@ -256,13 +256,17 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(MoveDataMessage message) {
-
         // Extract local columns that should be shared
         Map<Integer, Set<String>> stolenColumns = new HashMap<>();
         for (int attribute : message.getAttributes()) {
             Set<String> stolenColumn = this.columns.remove(attribute);
-            stolenColumns.put(attribute, stolenColumn);
-            this.valueCount = this.valueCount - stolenColumn.size();
+            if (stolenColumn != null) {
+                stolenColumns.put(attribute, stolenColumn);
+                this.valueCount = this.valueCount - stolenColumn.size();
+            } else {
+                // Column doesn't exist yet (DataProvider hasn't loaded data)
+                stolenColumns.put(attribute, new HashSet<>());
+            }
         }
 
         // Update memory usage
