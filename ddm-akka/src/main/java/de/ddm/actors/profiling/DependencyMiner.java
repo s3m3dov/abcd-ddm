@@ -124,8 +124,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 
 		this.pendingBatchMessages = new LinkedList<>();
-		this.pendingDataProviderRegistrations = new LinkedList<>();
-		this.pendingWorkerRegistrations = new LinkedList<>();
 
 		this.resultCollector = context.spawn(ResultCollector.create(), ResultCollector.DEFAULT_NAME);
 		this.largeMessageProxy = this.getContext().spawn(
@@ -140,7 +138,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.dependencyWorkers = new ArrayList<>();
 		this.dependencyWorkerLMPs = new ArrayList<>();
 		this.dependencyWorkersActive = new BooleanArrayList();
-		this.dependencyWorkersOverloaded = new BooleanArrayList();
 
 		this.dataProvider2workers = new HashMap<>();
 
@@ -175,7 +172,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private final List<ActorRef<DependencyWorker.Message>> dependencyWorkers;
 	private final List<ActorRef<LargeMessageProxy.Message>> dependencyWorkerLMPs;
 	private final BooleanList dependencyWorkersActive;
-	private final BooleanList dependencyWorkersOverloaded;
 
 	// Co-location tracking: maps dataProviderId to list of workerIds on same node
 	private final Map<Integer, List<Integer>> dataProvider2workers;
@@ -189,16 +185,14 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	// Pending messages
 	private final List<BatchMessage> pendingBatchMessages;
-	private final List<DataProviderRegistrationMessage> pendingDataProviderRegistrations;
-	private final List<DependencyWorkerRegistrationMessage> pendingWorkerRegistrations;
 
 	// Validation phase state
 	private boolean[][] candidateMatrix;
 	private List<IntList> worker2attributes;
 
 	// Rebalancing state
-	private boolean isRebalancing = false;
-	private IntSet rebalancingDataProviderIds = new IntOpenHashSet();
+	private IntSet rebalancingDataProviderIds = new IntOpenHashSet(); // IDs of DataProviders involved in rebalancing
+	private IntList awaitingDataProviderIds = new IntArrayList(); // IDs of DataProviders waiting for attributes
 
 	////////////////////
 	// Actor Behavior //
@@ -277,7 +271,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				this.dataProvidersActive.stream().filter(b -> b).count());
 
 		// Block batches during rebalancing
-		if (this.isRebalancing) {
+		if (this.isRebalancing()) {
 			this.getContext().getLog().info("Delaying batch processing because rebalancing is in progress");
 			this.pendingBatchMessages.add(message);
 			return this;
@@ -289,11 +283,11 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 			if (this.isValidationPhase()) {
 				// Log the result of the data reading process
-				this.getContext().getLog()
-						.info("Reading data completed in " + (System.currentTimeMillis() - this.startTime) + "ms");
+                this.getContext().getLog()
+                        .info("Reading data completed in {}ms", System.currentTimeMillis() - this.startTime);
 				for (int attribute = 0; attribute < this.attribute2worker.length; attribute++)
-					this.getContext().getLog()
-							.info("Attribute " + attribute + " is on worker " + this.attribute2worker[attribute]);
+                    this.getContext().getLog()
+                            .info("Attribute {} is on worker {}", attribute, this.attribute2worker[attribute]);
 
 				// Attempt to initiate the validation phase
 				this.initiateValidationPhase();
@@ -306,12 +300,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		if (this.dataProvidersOverloaded.stream().anyMatch(b -> b)) {
 			this.getContext().getLog()
 					.info("Delaying batch processing because one or more DataProviders are overloaded");
-			this.pendingBatchMessages.add(message);
-			return this;
-		}
-
-		// Wait for pending registrations to complete
-		if (!this.pendingDataProviderRegistrations.isEmpty() || !this.pendingWorkerRegistrations.isEmpty()) {
 			this.pendingBatchMessages.add(message);
 			return this;
 		}
@@ -364,12 +352,11 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.dataProvidersOverloaded.set(message.getDataProviderId(), message.isOverloaded());
 
 		// Track rebalancing completion
-		if (this.isRebalancing) {
+		if (this.isRebalancing()) {
 			this.rebalancingDataProviderIds.remove(message.getDataProviderId());
 
 			// Check if rebalancing is complete (all involved DataProviders reported)
 			if (this.rebalancingDataProviderIds.isEmpty()) {
-				this.isRebalancing = false;
 				this.getContext().getLog().info("Rebalancing complete, resuming batch processing");
 
 				// Process pending batches
@@ -389,38 +376,31 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			return this;
 		}
 
-		// Trigger rebalancing immediately if overloaded and new DataProviders available
+		// Trigger rebalancing immediately if overloaded and awaiting DataProviders
+		// exist
 		if (this.isBatchPhase()
-				&& !this.isRebalancing
+				&& !this.isRebalancing()
 				&& this.dataProvidersOverloaded.stream().anyMatch(b -> b) // Any overloaded
-				&& !this.pendingDataProviderRegistrations.isEmpty()) {
+				&& !this.awaitingDataProviderIds.isEmpty()) {
 
-			this.getContext().getLog()
-					.info("DataProvider overloaded with pending registrations, starting immediate rebalancing");
+			this.getContext().getLog().info("Overload detected with awaiting DataProviders, triggering rebalancing");
 			this.triggerRebalancing();
 			return this;
 		}
 
 		// Trigger rebalancing at batch boundary (all idle)
 		if (this.isBatchPhase()
-				&& !this.isRebalancing
+				&& !this.isRebalancing()
 				&& this.dataProvidersActive.stream().noneMatch(b -> b) // All idle
-				&& !this.pendingDataProviderRegistrations.isEmpty()) {
+				&& !this.awaitingDataProviderIds.isEmpty()) {
 
-			this.getContext().getLog().info("Batch boundary reached with pending registrations, starting rebalancing");
+			this.getContext().getLog().info("Batch boundary reached, triggering rebalancing");
 			this.triggerRebalancing();
 			return this;
 		}
 
-		// Process pending worker registrations
-		if (!this.pendingWorkerRegistrations.isEmpty()) {
-			for (DependencyWorkerRegistrationMessage registrationMessage : this.pendingWorkerRegistrations)
-				this.getContext().getSelf().tell(registrationMessage);
-			this.pendingWorkerRegistrations.clear();
-		}
-
-		// Only process pending batches if NOT rebalancing
-		if (!this.isRebalancing) {
+		// Resume batch processing if not rebalancing
+		if (!this.isRebalancing() && !this.pendingBatchMessages.isEmpty()) {
 			for (BatchMessage batchMessage : this.pendingBatchMessages)
 				this.getContext().getSelf().tell(batchMessage);
 			this.pendingBatchMessages.clear();
@@ -439,27 +419,28 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		if (this.dataProviders.contains(dataProvider))
 			return this;
 
-		// If we're in batch phase and this is the first DataProvider, register and
-		// start reading
-		if (this.isBatchPhase() && this.dataProviders.isEmpty()) {
-			this.registerNewDataProvider(dataProvider, dataProviderLMP);
+		// Register immediately
+		this.registerNewDataProvider(dataProvider, dataProviderLMP);
+		int dataProviderId = this.dataProviders.size() - 1;
+
+		// First DataProvider: initialize and start reading
+		if (this.isBatchPhase() && dataProviderId == 0) {
 			this.mapAttributesToDataProviders();
 			this.startReading();
 			return this;
 		}
 
-		// If in validation phase, reject (too late to join)
+		// Validation phase: too late to join
 		if (this.isValidationPhase())
 			return this;
 
-		// Otherwise, add to pending for batch-boundary rebalancing (don't register yet)
-		this.pendingDataProviderRegistrations.add(message);
-		this.getContext().getLog().info("Added DataProvider to pending, will rebalance at next batch boundary");
+		// Loading phase: add to awaiting list for rebalancing
+		this.awaitingDataProviderIds.add(dataProviderId);
+		this.getContext().getLog().info("DataProvider-{} awaiting rebalancing", dataProviderId);
 
-		// If DataProviders are overloaded, trigger immediate rebalancing
-		if (!this.isRebalancing && this.dataProvidersOverloaded.stream().anyMatch(b -> b)) {
-			this.getContext().getLog()
-					.info("DataProvider overloaded with pending registrations, starting immediate rebalancing");
+		// Trigger immediate rebalancing if overloaded
+		if (!this.isRebalancing() && this.dataProvidersOverloaded.stream().anyMatch(b -> b)) {
+			this.getContext().getLog().info("Overload detected, triggering immediate rebalancing");
 			this.triggerRebalancing();
 		}
 
@@ -477,18 +458,14 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		if (this.dependencyWorkers.contains(dependencyWorker))
 			return this;
 
-		// If the local DataProvider isn't registered yet, add to pending
+		// DataProvider must exist (it registers first)
 		if (!this.dataProviders.contains(localDataProvider)) {
-			this.pendingWorkerRegistrations.add(message);
-			this.getContext().getLog().info("Added Worker to pending, waiting for DataProvider registration");
+			this.getContext().getLog().error("Worker registration before DataProvider - this should not happen");
 			return this;
 		}
 
 		// Register the worker with its co-located DataProvider
 		this.registerNewWorker(dependencyWorker, dependencyWorkerLMP, localDataProvider);
-
-		// Worker registration doesn't trigger any special actions
-		// Workers are passive during loading phase
 		return this;
 	}
 
@@ -574,6 +551,12 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 						!this.pendingBatchMessages.isEmpty());
 	}
 
+	private boolean isRebalancing() {
+		// Part of BatchPhase
+		// Rebalancing is ongoing if there are still DataProviders involved
+		return !this.rebalancingDataProviderIds.isEmpty();
+	}
+
 	private boolean isValidationPhase() {
 		// The validation phase lasts until the algorithm ends
 		return !this.isBatchPhase();
@@ -599,7 +582,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.dependencyWorkerLMPs.add(dependencyWorkerLMP);
 		this.getContext().watch(dependencyWorker);
 		this.dependencyWorkersActive.add(false);
-		this.dependencyWorkersOverloaded.add(false);
 
 		// Track co-location: add workerId to DataProvider's worker list
 		int workerId = this.dependencyWorkers.size() - 1;
@@ -646,142 +628,113 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	// * REBALANCING * //
 	/**
-	 * Trigger rebalancing by processing pending DataProvider registrations
-	 * and initiating attribute stealing to the new DataProviders.
+	 * Trigger rebalancing by redistributing attributes evenly across all
+	 * DataProviders,
+	 * including those awaiting rebalancing.
 	 */
 	private void triggerRebalancing() {
-		// Process pending registrations and trigger rebalancing
-		for (DataProviderRegistrationMessage registrationMessage : this.pendingDataProviderRegistrations) {
-			// Register the DataProvider now
-			this.registerNewDataProvider(
-					registrationMessage.getDataProvider(),
-					registrationMessage.getDataProviderLMP());
+		int numDataProviders = this.dataProviders.size();
+		int numAttributes = this.attribute2name.length;
+		int targetAttributesPerDP = numAttributes / numDataProviders;
 
-			int newDataProviderId = this.dataProviders.size() - 1; // ID assigned by registerNewDataProvider
+		this.getContext().getLog().info("Rebalancing {} attributes across {} DataProviders (target: {} each)",
+				numAttributes, numDataProviders, targetAttributesPerDP);
 
-			// Steal attributes to the new DataProvider
-			this.stealAttributesTo(
-					newDataProviderId,
-					registrationMessage.getDataProvider(),
-					registrationMessage.getDataProviderLMP());
-		}
-		this.pendingDataProviderRegistrations.clear();
-
-		// Process pending worker registrations (workers that arrived before their
-		// DataProvider)
-		if (!this.pendingWorkerRegistrations.isEmpty()) {
-			this.getContext().getLog().info("Processing {} pending worker registrations",
-					this.pendingWorkerRegistrations.size());
-			for (DependencyWorkerRegistrationMessage registrationMessage : this.pendingWorkerRegistrations)
-				this.getContext().getSelf().tell(registrationMessage);
-			this.pendingWorkerRegistrations.clear();
+		// Calculate current distribution
+		int[] currentCounts = new int[numDataProviders];
+		for (int attribute = 0; attribute < numAttributes; attribute++) {
+			currentCounts[this.attribute2dataProvider[attribute]]++;
 		}
 
-		this.isRebalancing = true;
-		this.getContext().getLog().info("Rebalancing in progress, batches will be delayed");
+		// Log BEFORE state
+		logAttributeDistribution("BEFORE rebalancing", currentCounts);
+
+		// For each awaiting DataProvider, steal attributes to reach target
+		for (int awaitingDPId : this.awaitingDataProviderIds) {
+			int needed = targetAttributesPerDP;
+			Int2IntMap attribute2sourceDP = new Int2IntOpenHashMap(); // Track original source before update
+
+			// Steal from DataProviders that have more than target
+			for (int sourceDP = 0; sourceDP < numDataProviders; sourceDP++) {
+				if (sourceDP == awaitingDPId)
+					continue;
+
+				while (currentCounts[sourceDP] > targetAttributesPerDP && needed > 0) {
+					// Find a random attribute owned by sourceDP
+					int attribute = findRandomAttribute(sourceDP);
+
+					// Track the source BEFORE updating mapping
+					attribute2sourceDP.put(attribute, sourceDP);
+
+					// Update mapping immediately
+					this.attribute2dataProvider[attribute] = awaitingDPId;
+					currentCounts[sourceDP]--;
+					currentCounts[awaitingDPId]++;
+					needed--;
+				}
+			}
+
+			// Send MoveDataMessages to source DataProviders
+			sendMoveDataMessages(awaitingDPId, attribute2sourceDP);
+		}
+
+		// Track all involved DataProviders for rebalancing completion
+		for (int dpId = 0; dpId < numDataProviders; dpId++) {
+			this.rebalancingDataProviderIds.add(dpId);
+		}
+
+		// Clear awaiting list
+		this.awaitingDataProviderIds.clear();
+		// Log AFTER state
+		logAttributeDistribution("AFTER rebalancing", currentCounts);
+
+		this.getContext().getLog().info("Rebalancing in progress, batches delayed");
 	}
 
 	/**
-	 * Steal attributes from existing DataProviders to the target DataProvider.
+	 * Find a random attribute owned by the specified DataProvider.
 	 */
-	private void stealAttributesTo(int targetDataProviderId,
-			ActorRef<DataProvider.Message> targetDataProvider,
-			ActorRef<LargeMessageProxy.Message> targetDataProviderLMP) {
-		// Find attributes to steal; we aim to steal evenly from the DataProviders with
-		// the most partitions (this is a very simple stealing approach)
-		IntSet attributesToSteal = new IntAVLTreeSet();
-		int numDataProviders = this.dataProviders.size();
-		int numAttributes = this.attribute2name.length;
-		int numAttributesToSteal = (int) Math.floor((double) numAttributes / numDataProviders);
-
-		int[] attributesPerDataProviderCounts = new int[numDataProviders];
-		for (int dpId : this.attribute2dataProvider)
-			attributesPerDataProviderCounts[dpId] += 1;
-
-		// Log detailed attribute distribution BEFORE and AFTER rebalancing
-		logAttributeDistribution("BEFORE rebalancing", attributesPerDataProviderCounts);
-
-		// Steal attributes
-		Random random = new Random();
-		while (attributesToSteal.size() < numAttributesToSteal) {
-			// Find DataProvider with the currently most partitions
-			int dataProviderWithHighestCount = 0;
-			int highestCount = attributesPerDataProviderCounts[0];
-			for (int i = 1; i < numDataProviders; i++) {
-				if (attributesPerDataProviderCounts[i] > highestCount) {
-					dataProviderWithHighestCount = i;
-					highestCount = attributesPerDataProviderCounts[i];
-				}
-			}
-
-			// Steal one random partition from the DataProvider with the currently most
-			// partitions
-			int randomPartitionNumber = random.nextInt(highestCount) + 1;
-			for (int i = 0; i < this.attribute2dataProvider.length; i++) {
-				if ((this.attribute2dataProvider[i] == dataProviderWithHighestCount)
-						&& (!attributesToSteal.contains(i))) {
-					randomPartitionNumber--;
-					if (randomPartitionNumber == 0) {
-						attributesToSteal.add(i);
-						break;
-					}
-				}
-			}
-			attributesPerDataProviderCounts[dataProviderWithHighestCount] -= 1;
-		}
-
-		// Collect the stolen attributes for every DataProvider that needs to send
-		// stolen attributes to the new DataProvider and reassign stolen attributes
-		Int2ObjectMap<IntArrayList> dataProvider2stolenAttributes = new Int2ObjectArrayMap<>(this.dataProviders.size());
-		for (int attribute : attributesToSteal) {
-			int sourceDataProviderId = this.attribute2dataProvider[attribute];
-			if (!dataProvider2stolenAttributes.containsKey(sourceDataProviderId)) {
-				dataProvider2stolenAttributes.put(sourceDataProviderId, new IntArrayList());
-
-			}
-			dataProvider2stolenAttributes.get(sourceDataProviderId).add(attribute);
-			this.attribute2dataProvider[attribute] = targetDataProviderId;
-		}
-
-		// Send the MoveDataMessages to start the stealing process
-		for (Int2ObjectMap.Entry<IntArrayList> entry : dataProvider2stolenAttributes.int2ObjectEntrySet()) {
-			int[] attributes = entry.getValue().toArray(new int[0]);
-			int sourceDataProviderId = entry.getIntKey();
-			DataProvider.MoveDataMessage moveDataMessage = new DataProvider.MoveDataMessage(
-					attributes, targetDataProviderId, targetDataProvider, targetDataProviderLMP,
-					dataProvider2stolenAttributes.size());
-			this.dataProviders.get(sourceDataProviderId).tell(moveDataMessage);
-			this.dataProvidersActive.set(sourceDataProviderId, true);
-		}
-		this.dataProvidersActive.set(targetDataProviderId, true);
-
-		// Track which DataProviders are involved in this rebalancing
-		for (int sourceDataProviderId : dataProvider2stolenAttributes.keySet()) {
-			this.rebalancingDataProviderIds.add(sourceDataProviderId);
-		}
-		this.rebalancingDataProviderIds.add(targetDataProviderId); // New DataProvider
-
-		this.getContext().getLog().info("Rebalancing involves {} DataProviders",
-				this.rebalancingDataProviderIds.size());
-
-		// Inform the new DataProvider of its ID and assigned attributes
-		IntArrayList targetAttributes = new IntArrayList();
-		for (int attribute = 0; attribute < this.attribute2dataProvider.length; attribute++) {
-			if (this.attribute2dataProvider[attribute] == targetDataProviderId) {
-				targetAttributes.add(attribute);
+	private int findRandomAttribute(int dataProviderId) {
+		IntList candidates = new IntArrayList();
+		for (int i = 0; i < this.attribute2dataProvider.length; i++) {
+			if (this.attribute2dataProvider[i] == dataProviderId) {
+				candidates.add(i);
 			}
 		}
-		targetDataProvider.tell(new DataProvider.SetIdAndAttributesMessage(
-				targetDataProviderId, targetAttributes.toArray(new int[0])));
-		this.getContext().getLog().info("Informed DataProvider-{} of {} assigned attributes",
-				targetDataProviderId, targetAttributes.size());
-
-		// Calculate AFTER distribution
-		int[] attributeCountsAfter = new int[this.dataProviders.size()];
-		for (int attribute = 0; attribute < this.attribute2dataProvider.length; attribute++) {
-			attributeCountsAfter[this.attribute2dataProvider[attribute]]++;
+		if (candidates.isEmpty()) {
+			throw new IllegalStateException("DataProvider-" + dataProviderId + " has no attributes");
 		}
-		logAttributeDistribution("AFTER rebalancing", attributeCountsAfter);
+		return candidates.getInt(new Random().nextInt(candidates.size()));
+	}
+
+	/**
+	 * Send MoveDataMessages to source DataProviders to move attributes to target.
+	 */
+	private void sendMoveDataMessages(int targetDPId, Int2IntMap attribute2sourceDP) {
+		// Group attributes by source DataProvider
+		Int2ObjectMap<IntList> sourceDP2attributes = new Int2ObjectArrayMap<>();
+		for (Int2IntMap.Entry entry : attribute2sourceDP.int2IntEntrySet()) {
+			int attribute = entry.getIntKey();
+			int sourceDP = entry.getIntValue();
+			sourceDP2attributes.computeIfAbsent(sourceDP, k -> new IntArrayList()).add(attribute);
+		}
+
+		// Send MoveDataMessage to each source
+		ActorRef<DataProvider.Message> targetDP = this.dataProviders.get(targetDPId);
+		ActorRef<LargeMessageProxy.Message> targetLMP = this.dataProviderLMPs.get(targetDPId);
+
+		for (Int2ObjectMap.Entry<IntList> entry : sourceDP2attributes.int2ObjectEntrySet()) {
+			int sourceDPId = entry.getIntKey();
+			int[] attributes = entry.getValue().toIntArray();
+
+			DataProvider.MoveDataMessage msg = new DataProvider.MoveDataMessage(
+					attributes, targetDPId, targetDP, targetLMP, sourceDP2attributes.size());
+
+			this.dataProviders.get(sourceDPId).tell(msg);
+			this.dataProvidersActive.set(sourceDPId, true);
+		}
+
+		this.dataProvidersActive.set(targetDPId, true);
 	}
 
 	/**
