@@ -124,6 +124,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 
 		this.pendingBatchMessages = new LinkedList<>();
+		this.pendingWorkerRegistrations = new LinkedList<>();
 
 		this.resultCollector = context.spawn(ResultCollector.create(), ResultCollector.DEFAULT_NAME);
 		this.largeMessageProxy = this.getContext().spawn(
@@ -185,6 +186,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	// Pending messages
 	private final List<BatchMessage> pendingBatchMessages;
+	private final List<DependencyWorkerRegistrationMessage> pendingWorkerRegistrations;
 
 	// Validation phase state
 	private boolean[][] candidateMatrix;
@@ -283,14 +285,15 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 			if (this.isValidationPhase()) {
 				// Log the result of the data reading process
-				this.getContext().getLog().info("Reading data completed in {}ms", System.currentTimeMillis() - this.startTime);
+				this.getContext().getLog().info("Reading data completed in {}ms",
+						System.currentTimeMillis() - this.startTime);
 				// Output current DependencyMiner information for debugging
 				this.outputDebugInformation();
 				// Send debug info to each DataProvider
 				this.requestDebugInfoFromDataProviders();
 
-                // Prepare for validation phase
-                for (int attribute = 0; attribute < this.attribute2worker.length; attribute++)
+				// Prepare for validation phase
+				for (int attribute = 0; attribute < this.attribute2worker.length; attribute++)
 					this.getContext().getLog()
 							.info("Attribute {} is on worker {}", attribute, this.attribute2worker[attribute]);
 
@@ -428,6 +431,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.registerNewDataProvider(dataProvider, dataProviderLMP);
 		int dataProviderId = this.dataProviders.size() - 1;
 
+		// Process any pending worker registrations for this DataProvider
+		this.processPendingWorkerRegistrations(dataProvider);
+
 		// First DataProvider: initialize and start reading
 		if (this.isBatchPhase() && dataProviderId == 0) {
 			this.mapAttributesToDataProviders();
@@ -465,7 +471,8 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		// DataProvider must exist (it registers first)
 		if (!this.dataProviders.contains(localDataProvider)) {
-			this.getContext().getLog().error("Worker registration before DataProvider - this should not happen");
+			this.getContext().getLog().warn("Worker registration before DataProvider - queuing for later processing");
+			this.pendingWorkerRegistrations.add(message);
 			return this;
 		}
 
@@ -595,6 +602,29 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		this.getContext().getLog().info("Registered Worker-{} co-located with DataProvider-{}",
 				workerId, dataProviderId);
+	}
+
+	/**
+	 * Process pending worker registrations for a newly registered DataProvider
+	 */
+	private void processPendingWorkerRegistrations(ActorRef<DataProvider.Message> dataProvider) {
+		if (this.pendingWorkerRegistrations.isEmpty())
+			return;
+
+		// Find all workers waiting for this DataProvider
+		List<DependencyWorkerRegistrationMessage> toProcess = new ArrayList<>();
+		for (DependencyWorkerRegistrationMessage msg : this.pendingWorkerRegistrations) {
+			if (msg.getLocalDataProvider().equals(dataProvider)) {
+				toProcess.add(msg);
+			}
+		}
+
+		// Remove from pending and send messages back to self for processing
+		for (DependencyWorkerRegistrationMessage msg : toProcess) {
+			this.pendingWorkerRegistrations.remove(msg);
+			this.getContext().getLog().info("Re-sending pending worker registration for processing");
+			this.getContext().getSelf().tell(msg);
+		}
 	}
 
 	// * MAPPING & READING * //
