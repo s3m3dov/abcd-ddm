@@ -103,7 +103,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	private final ActorRef<DataProvider.Message> localDataProvider; // Local DataProvider on this node
 
 	private ActorRef<DependencyMiner.Message> dependencyMiner;
-	private int workerId = -1;
+	private int dependencyWorkerId = -1;
 
 	// Current task state
 	private ValidateTaskMessage currentTask = null;
@@ -143,14 +143,14 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	private Behavior<Message> handle(SetWorkerIdMessage message) {
-		this.workerId = message.getWorkerId();
-		this.getContext().getLog().info("Worker ID set to {}", this.workerId);
+		this.dependencyWorkerId = message.getWorkerId();
+		this.getContext().getLog().info("DependencyWorker ID set to {}", this.dependencyWorkerId);
 		return this;
 	}
 
 	private Behavior<Message> handle(ValidateTaskMessage message) {
-		this.getContext().getLog().info("Received validation task: {} ⊆ {}?",
-				message.getLhsAttributeId(), message.getRhsAttributeId());
+		this.getContext().getLog().info("DependencyWorker-{} received validation task: {} ⊆ {}",
+                this.dependencyWorkerId, message.getLhsAttributeId(), message.getRhsAttributeId());
 
 		// Store current task
 		this.currentTask = message;
@@ -170,10 +170,10 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		// Store fetched column data
 		if (message.getAttributeId() == this.currentTask.getLhsAttributeId()) {
 			this.lhsData = message.getColumnData();
-			this.getContext().getLog().debug("Received LHS data for attribute {}", message.getAttributeId());
+			this.getContext().getLog().debug("DependencyWorker-{} received LHS data for attribute {}", this.dependencyWorkerId, message.getAttributeId());
 		} else if (message.getAttributeId() == this.currentTask.getRhsAttributeId()) {
 			this.rhsData = message.getColumnData();
-			this.getContext().getLog().debug("Received RHS data for attribute {}", message.getAttributeId());
+			this.getContext().getLog().debug("DependencyWorker-{} received RHS data for attribute {}", this.dependencyWorkerId, message.getAttributeId());
 		}
 
 		// When both ready, execute validation
@@ -192,16 +192,22 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		// Check if LHS ⊆ RHS (all values in LHS exist in RHS)
 		boolean isIND = this.rhsData.containsAll(this.lhsData);
 
-		this.getContext().getLog().info("Validation result: {} ⊆ {} = {}",
-				this.currentTask.getLhsAttributeId(),
-				this.currentTask.getRhsAttributeId(),
-				isIND);
+		// Debug: Show sample data
+		String lhsSample = Arrays.toString(this.lhsData.stream().limit(5).toArray(String[]::new));
+		String rhsSample = Arrays.toString(this.rhsData.stream().limit(5).toArray(String[]::new));
+
+		this.getContext().getLog().debug(
+				"DependencyWorker-{} validation result for {} ⊆ {}: {} (LHS size: {}, RHS size: {}, LHS sample: {}, RHS sample: {})",
+                this.dependencyWorkerId,
+				this.currentTask.getLhsAttributeId(), this.lhsData.size(),
+				this.currentTask.getRhsAttributeId(), this.rhsData.size(),
+				isIND, lhsSample, rhsSample);
 
 		// Send result to DependencyMiner
 		this.dependencyMiner.tell(new DependencyMiner.ResultMessage(
 				isIND ? new int[] { this.currentTask.getLhsAttributeId() } : new int[0],
 				isIND ? new int[] { this.currentTask.getRhsAttributeId() } : new int[0],
-				this.workerId));
+				this.dependencyWorkerId));
 
 		// Clear current task (ready for next assignment)
 		this.currentTask = null;

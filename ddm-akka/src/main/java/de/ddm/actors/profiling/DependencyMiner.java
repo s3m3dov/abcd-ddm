@@ -192,6 +192,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private Queue<int[]> remainingTasks; // Queue of [lhsAttr, rhsAttr] pairs
 	private int totalTasks;
 	private int completedTasks;
+	private int totalINDsFound;
 
 	// Rebalancing state
 	private IntSet rebalancingDataProviderIds = new IntOpenHashSet(); // IDs of DataProviders involved in rebalancing
@@ -479,7 +480,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	private Behavior<Message> handle(ResultMessage message) {
 		this.completedTasks++;
-		this.getContext().getLog().info("ResultMessage! {} INDs from worker {} ({}/{} tasks completed)",
+		this.getContext().getLog().info("ResultMessage! {} INDs from DependencyWorker-{} ({}/{} tasks completed)",
 				message.getLhss().length, message.getWorkerId(), this.completedTasks, this.totalTasks);
 
 		// Create Inclusion Dependency objects from the results
@@ -493,6 +494,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		// Send Inclusion Dependency objects to the result collector
 		if (!inds.isEmpty()) {
+			this.totalINDsFound += inds.size();
 			this.resultCollector.tell(new ResultCollector.ResultMessage(inds));
 		}
 
@@ -836,6 +838,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		this.totalTasks = this.remainingTasks.size();
 		this.completedTasks = 0;
+		this.totalINDsFound = 0;
 
 		this.getContext().getLog().info("Generated {} validation tasks", this.totalTasks);
 
@@ -858,6 +861,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				this.resultCollector.tell(new ResultCollector.FinalizeMessage());
 				long discoveryTime = System.currentTimeMillis() - this.startTime;
 				this.getContext().getLog().info("Finished mining within {} ms!", discoveryTime);
+                this.getContext().getLog().info("Total Inclusion Dependencies found: {}", this.totalINDsFound);
 			}
 			return;
 		}
