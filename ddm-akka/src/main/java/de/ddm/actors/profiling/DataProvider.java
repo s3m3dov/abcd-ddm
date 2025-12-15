@@ -59,8 +59,8 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     public static class AcceptDataMessage implements Message {
         private static final long serialVersionUID = -7984837187618402770L;
         Map<Integer, Set<String>> columns;
-        int receivedColumns;
-        int sourceDataProviderId;
+        int totalExpectedMoves;
+        int fromDataProviderId;
     }
 
     /**
@@ -87,15 +87,24 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     /**
-     * Welcome Message from DependencyMiner to set up the DataProvider with its ID
-     * and managed attributes
+     * Message to set the DataProvider's ID
      */
     @Getter
     @NoArgsConstructor
     @AllArgsConstructor
-    public static class SetIdAndAttributesMessage implements Message {
-        private static final long serialVersionUID = -9234567890123456L;
+    public static class SetDataProviderIdMessage implements Message {
+        private static final long serialVersionUID = -8765432109876543210L;
         int dataProviderId;
+    }
+
+    /**
+     * Message to inform DataProvider about its initial attribute responsibilities
+     */
+    @Getter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class InitialAttributesMessage implements Message {
+        private static final long serialVersionUID = -1234567890987654321L;
         int[] attributes;
     }
 
@@ -139,7 +148,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 LargeMessageProxy.create(context.getSelf().unsafeUpcast(), false),
                 LargeMessageProxy.DEFAULT_NAME);
 
-        // dataProviderId will be set during SetIdAndAttributesMessage
+        // dataProviderId will be set via SetDataProviderIdMessage
         this.dataProviderId = -1;
 
         // dependencyMiner will be discovered via Receptionist
@@ -189,7 +198,8 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     public Receive<Message> createReceive() {
         return newReceiveBuilder()
                 .onMessage(ReceptionistListingMessage.class, this::handle)
-                .onMessage(SetIdAndAttributesMessage.class, this::handle)
+                .onMessage(SetDataProviderIdMessage.class, this::handle)
+                .onMessage(InitialAttributesMessage.class, this::handle)
                 .onMessage(DataMessage.class, this::handle)
                 .onMessage(MoveDataMessage.class, this::handle)
                 .onMessage(AcceptDataMessage.class, this::handle)
@@ -217,13 +227,18 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         return this;
     }
 
-    private Behavior<Message> handle(SetIdAndAttributesMessage message) {
-        // Initialize columns for the attributes we'll manage
+    private Behavior<Message> handle(SetDataProviderIdMessage message) {
         this.dataProviderId = message.getDataProviderId();
+        this.getContext().getLog().info("DataProvider ID set to {}", this.dataProviderId);
+        return this;
+    }
+
+    private Behavior<Message> handle(InitialAttributesMessage message) {
+        // Initialize columns for the attributes we'll manage
         for (int attribute : message.getAttributes()) {
             this.columns.put(attribute, new HashSet<>());
         }
-        this.getContext().getLog().info("DataProvider-{} registered {} attributes, reporting status...",
+        this.getContext().getLog().info("DataProvider-{} initialized with {} attributes",
                 this.dataProviderId, message.getAttributes().length);
         this.reportStatus();
         return this;
@@ -258,29 +273,25 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(MoveDataMessage message) {
-        // Extract local columns that should be shared
-        Map<Integer, Set<String>> stolenColumns = new HashMap<>();
-        for (int attribute : message.getAttributes()) {
-            Set<String> stolenColumn = this.columns.remove(attribute);
-            if (stolenColumn != null) {
-                stolenColumns.put(attribute, stolenColumn);
-                this.valueCount = this.valueCount - stolenColumn.size();
-            } else {
-                // Column doesn't exist yet (DataProvider hasn't loaded data)
-                stolenColumns.put(attribute, new HashSet<>());
-            }
-        }
+        this.getContext().getLog().info(
+                "DataProvider-{} moving {} columns TO DataProvider-{}",
+                this.dataProviderId,
+                message.getAttributes().length,
+                message.getToDataProviderId());
 
-        // Update memory usage
+        // Step 1: Extract the columns that need to be moved
+        Map<Integer, Set<String>> columnsToMove = this.extractColumnsForMove(message.getAttributes());
+
+        // Step 2: Update our memory usage after removing columns
         this.updateMemoryUsage();
 
-        // Send columns to target worker
-        LargeMessageProxy.LargeMessage acceptDataMessage = new AcceptDataMessage(stolenColumns,
-                message.getExpectedMoveCount(), message.getToDataProviderId());
-        this.largeMessageProxy
-                .tell(new LargeMessageProxy.SendMessage(acceptDataMessage, message.getToDataProviderLMP()));
+        // Step 3: Send the extracted columns to the destination DataProvider
+        this.sendColumnsToDestination(columnsToMove, message.getExpectedMoveCount(),
+                message.getToDataProviderId(), message.getToDataProviderLMP());
 
+        // Step 4: Report our new status to DependencyMiner
         this.reportStatus();
+
         return this;
     }
 
@@ -289,25 +300,21 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 "DataProvider-{} accepting {} columns from DataProvider-{}",
                 this.dataProviderId,
                 message.getColumns().size(),
-                message.getSourceDataProviderId());
+                message.getFromDataProviderId());
 
-        // Accept the columns
-        for (Map.Entry<Integer, Set<String>> entry : message.getColumns().entrySet()) {
-            this.columns.put(entry.getKey().intValue(), entry.getValue());
-            this.valueCount = this.valueCount + entry.getValue().size(); // Add values when accepting
-        }
+        // Step 1: Add the received columns to our local storage
+        this.acceptIncomingColumns(message.getColumns());
 
-        // Update memory usage
+        // Step 2: Update our memory usage after adding columns
         this.updateMemoryUsage();
 
-        // Update acceptMessageCounter and test if this was the last message to be
-        // accepted, i.e., the stealing is done
+        // Step 3: Track progress and report when all moves are complete
         this.receivedBatchCount++;
-        if (this.receivedBatchCount == message.getReceivedColumns()) {
+        if (this.receivedBatchCount == message.getTotalExpectedMoves()) {
             this.receivedBatchCount = 0;
-
             this.reportStatus();
         }
+
         return this;
     }
 
@@ -357,6 +364,76 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     /////////////////
     // Actor Utils //
     /////////////////
+
+    /**
+     * Extract columns from local storage for moving to another DataProvider.
+     * Removes the columns from this DataProvider and updates value count.
+     * 
+     * @param attributes Array of attribute IDs to extract
+     * @return Map of attribute ID to column data (Set of values)
+     */
+    private Map<Integer, Set<String>> extractColumnsForMove(int[] attributes) {
+        Map<Integer, Set<String>> columnsToMove = new HashMap<>();
+
+        for (int attribute : attributes) {
+            Set<String> column = this.columns.remove(attribute);
+
+            if (column != null) {
+                // Column exists - move it and update value count
+                columnsToMove.put(attribute, column);
+                this.valueCount -= column.size();
+            } else {
+                // Column doesn't exist yet (data hasn't been loaded)
+                // Send empty set as placeholder
+                columnsToMove.put(attribute, new HashSet<>());
+            }
+        }
+
+        return columnsToMove;
+    }
+
+    /**
+     * Send extracted columns to the destination DataProvider.
+     * 
+     * @param columnsToMove     Map of columns to send
+     * @param expectedMoveCount Total number of move operations expected
+     * @param toDataProviderId  ID of the destination DataProvider
+     * @param toDataProviderLMP LargeMessageProxy of the destination DataProvider
+     */
+    private void sendColumnsToDestination(
+            Map<Integer, Set<String>> columnsToMove,
+            int expectedMoveCount,
+            int toDataProviderId,
+            ActorRef<LargeMessageProxy.Message> toDataProviderLMP) {
+
+        AcceptDataMessage acceptMessage = new AcceptDataMessage(
+                columnsToMove,
+                expectedMoveCount,
+                this.dataProviderId // We are the "from" DataProvider
+        );
+
+        this.largeMessageProxy.tell(
+                new LargeMessageProxy.SendMessage(acceptMessage, toDataProviderLMP));
+    }
+
+    /**
+     * Accept incoming columns from another DataProvider during rebalancing.
+     * Adds the columns to local storage and updates value count.
+     * 
+     * @param incomingColumns Map of attribute ID to column data
+     */
+    private void acceptIncomingColumns(Map<Integer, Set<String>> incomingColumns) {
+        for (Map.Entry<Integer, Set<String>> entry : incomingColumns.entrySet()) {
+            int attributeId = entry.getKey();
+            Set<String> columnData = entry.getValue();
+
+            // Add the column to our storage
+            this.columns.put(attributeId, columnData);
+
+            // Update our total value count
+            this.valueCount += columnData.size();
+        }
+    }
 
     /**
      * Transition from loading phase to validation phase by sorting columns
