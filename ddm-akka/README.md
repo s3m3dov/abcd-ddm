@@ -118,17 +118,22 @@ java -Xms512m -Xmx512m -jar target/ddm-akka.jar master -w 0
 
 **Terminal 2 - Worker 1 (default port 7879):**
 ```bash
-java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 1
+java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 4
 ```
 
 **Terminal 3 - Worker 2 (custom port):**
 ```bash
-java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 1 -p 7880
+java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 2 -p 7880
 ```
 
 **Terminal 4 - Worker 3 (another custom port):**
 ```bash
 java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 1 -p 7881
+```
+
+**Terminal 5 - Worker 4 (another custom port):**
+```bash
+java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 1 -p 7882
 ```
 
 > **Important:** Each worker on the same machine must use a different port (`-p` flag).
