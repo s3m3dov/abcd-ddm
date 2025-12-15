@@ -73,6 +73,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         private static final long serialVersionUID = -3571780705578600223L;
         int attributeId;
         ActorRef<DependencyWorker.Message> replyTo;
+        ActorRef<LargeMessageProxy.Message> replyToLMP;
     }
 
     /**
@@ -330,8 +331,11 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
             columnData = Collections.emptySet();
         }
 
-        // Send ColumnDataMessage directly to DependencyWorker
-        message.getReplyTo().tell(new DependencyWorker.ColumnDataMessage(message.getAttributeId(), columnData));
+        // Send ColumnDataMessage via LargeMessageProxy to handle large payloads
+        DependencyWorker.ColumnDataMessage response = new DependencyWorker.ColumnDataMessage(
+                message.getAttributeId(), columnData);
+        this.largeMessageProxy.tell(
+                new LargeMessageProxy.SendMessage(response, message.getReplyToLMP()));
 
         return this;
     }
