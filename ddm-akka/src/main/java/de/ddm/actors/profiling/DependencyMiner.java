@@ -141,6 +141,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.dependencyWorkersActive = new BooleanArrayList();
 
 		this.dataProvider2workers = new HashMap<>();
+		this.worker2dataProvider = new HashMap<>();
 
 		context.getSystem().receptionist().tell(Receptionist.register(dependencyMinerService, context.getSelf()));
 	}
@@ -176,12 +177,12 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	// Co-location tracking: maps dataProviderId to list of workerIds on same node
 	private final Map<Integer, List<Integer>> dataProvider2workers;
+	private final Map<Integer, Integer> worker2dataProvider; // Reverse mapping: workerId -> dataProviderId
 
 	// Attribute mappings
 	private HashMap<File, int[]> file2attribute;
 	private File[] attribute2file;
 	private String[] attribute2name;
-	private int[] attribute2worker;
 	private int[] attribute2dataProvider; // Maps attribute to DataProvider ID
 
 	// Pending messages
@@ -189,7 +190,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private final List<DependencyWorkerRegistrationMessage> pendingWorkerRegistrations;
 
 	// Validation phase state
-	private Queue<int[]> remainingTasks; // Queue of [lhsAttr, rhsAttr] pairs
+	private Map<Integer, Queue<int[]>> workerTaskQueues; // Per-worker task queues for locality
 	private int totalTasks;
 	private int completedTasks;
 	private int totalINDsFound;
@@ -499,7 +500,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 
 		// Assign next task to this worker (work-pulling)
-		this.assignNextTask(message.getWorkerId());
+		this.assignNextValidationTask(message.getWorkerId());
 
 		return this;
 	}
@@ -568,6 +569,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int workerId = this.dependencyWorkers.size() - 1;
 		int dataProviderId = this.dataProviders.indexOf(localDataProvider);
 		this.dataProvider2workers.computeIfAbsent(dataProviderId, k -> new ArrayList<>()).add(workerId);
+		this.worker2dataProvider.put(workerId, dataProviderId); // Reverse mapping
 
 		this.getContext().getLog().info("Registered DependencyWorker-{} co-located with DataProvider-{}",
 				workerId, dataProviderId);
@@ -613,53 +615,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		this.getContext().getLog().info("Mapped {} attributes to {} DataProviders",
 				numAttributes, numDataProviders);
-	}
-
-	/**
-	 * Map attributes to workers considering locality.
-	 * Each attribute is assigned to a worker co-located with the DataProvider that
-	 * holds the data.
-	 */
-	private void mapAttributesToWorkers() {
-		int numAttributes = this.attribute2name.length;
-		int numWorkers = this.dependencyWorkers.size();
-
-		this.attribute2worker = new int[numAttributes];
-
-		// For each attribute, find which DataProvider holds it,
-		// then assign it to one of the workers co-located with that DataProvider
-		for (int attribute = 0; attribute < numAttributes; attribute++) {
-			int dataProviderId = this.attribute2dataProvider[attribute];
-
-			// Get the list of workers co-located with this DataProvider
-			List<Integer> colocatedWorkers = this.dataProvider2workers.get(dataProviderId);
-
-			if (colocatedWorkers == null || colocatedWorkers.isEmpty()) {
-				// In case no co-located workers, use round-robin across all workers (should not
-				// happen)
-				this.getContext().getLog().warn(
-						"No co-located workers found for DataProvider-{}, using round-robin for attribute {}",
-						dataProviderId, attribute);
-				this.attribute2worker[attribute] = attribute % numWorkers;
-			} else {
-				// Assign to one of the co-located workers using round-robin within the group
-				int workerIndex = attribute % colocatedWorkers.size();
-				this.attribute2worker[attribute] = colocatedWorkers.get(workerIndex);
-			}
-		}
-
-		this.getContext().getLog().info("Mapped {} attributes to {} workers (locality-aware)",
-				numAttributes, numWorkers);
-
-		// Log the distribution
-		int[] workerAttributeCounts = new int[numWorkers];
-		for (int attribute = 0; attribute < numAttributes; attribute++) {
-			workerAttributeCounts[this.attribute2worker[attribute]]++;
-		}
-		for (int workerId = 0; workerId < numWorkers; workerId++) {
-			this.getContext().getLog().info("Worker-{} assigned {} attributes",
-					workerId, workerAttributeCounts[workerId]);
-		}
 	}
 
 	private void startReading() {
@@ -781,7 +736,8 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			int fromDataProviderId = entry.getIntKey();
 			int[] attributes = entry.getValue().toIntArray();
 
-			DataProvider.MoveDataMessage msg = new DataProvider.MoveDataMessage(attributes, toDataProviderId, toDataProvider, toDataProviderLMP, sourceDP2attributes.size());
+			DataProvider.MoveDataMessage msg = new DataProvider.MoveDataMessage(attributes, toDataProviderId,
+					toDataProvider, toDataProviderLMP, sourceDP2attributes.size());
 
 			this.dataProviders.get(fromDataProviderId).tell(msg);
 			this.dataProvidersActive.set(fromDataProviderId, true);
@@ -829,62 +785,117 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.getContext().getLog().info("Initiating validation phase with {} attributes and {} workers",
 				numAttributes, numWorkers);
 
-		// Generate all unary IND candidates (all attribute pairs)
-		this.remainingTasks = new LinkedList<>();
-		for (int lhs = 0; lhs < numAttributes; lhs++) {
-			for (int rhs = 0; rhs < numAttributes; rhs++) {
-				if (lhs != rhs) {
-					this.remainingTasks.add(new int[] { lhs, rhs });
+		// Generate per-worker task queues based on locality
+		// Each worker gets tasks where LHS attribute is local to its DataProvider
+		this.workerTaskQueues = new HashMap<>();
+		for (int workerId = 0; workerId < numWorkers; workerId++) {
+			this.workerTaskQueues.put(workerId, new LinkedList<>());
+		}
+
+		// Distribute tasks to workers based on LHS locality
+		int totalTasksGenerated = 0;
+		for (int lhsAttr = 0; lhsAttr < numAttributes; lhsAttr++) {
+			// Find which DataProvider holds the LHS attribute
+			int lhsDataProviderId = this.attribute2dataProvider[lhsAttr];
+
+			// Get workers co-located with this DataProvider
+			List<Integer> colocatedWorkers = this.dataProvider2workers.get(lhsDataProviderId);
+
+			if (colocatedWorkers == null || colocatedWorkers.isEmpty()) {
+				this.getContext().getLog().warn(
+						"No workers co-located with DataProvider-{} for attribute {}, skipping tasks",
+						lhsDataProviderId, lhsAttr);
+				continue;
+			}
+
+			// Assign ALL tasks for this LHS attribute to a single worker (round-robin by
+			// LHS)
+			// This ensures the worker loads the LHS once and validates against all RHS
+			// attributes
+			int targetWorkerId = colocatedWorkers.get(lhsAttr % colocatedWorkers.size());
+
+			for (int rhsAttr = 0; rhsAttr < numAttributes; rhsAttr++) {
+				if (lhsAttr != rhsAttr) {
+					this.workerTaskQueues.get(targetWorkerId).add(new int[] { lhsAttr, rhsAttr });
+					totalTasksGenerated++;
 				}
 			}
 		}
 
-		this.totalTasks = this.remainingTasks.size();
+		this.totalTasks = totalTasksGenerated;
 		this.completedTasks = 0;
 		this.totalINDsFound = 0;
 
-		this.getContext().getLog().info("Generated {} validation tasks", this.totalTasks);
+		this.getContext().getLog().info("Generated {} validation tasks distributed across {} DependencyWorkers",
+				this.totalTasks, numWorkers);
+
+		// Log task distribution
+		for (int workerId = 0; workerId < numWorkers; workerId++) {
+			int taskCount = this.workerTaskQueues.get(workerId).size();
+			this.getContext().getLog().info("DependencyWorker-{} has assigned {} tasks", workerId, taskCount);
+		}
 
 		// Assign initial task to each worker
 		for (int workerId = 0; workerId < numWorkers; workerId++) {
-			this.assignNextTask(workerId);
+			this.assignNextValidationTask(workerId);
 		}
 	}
 
 	/**
-	 * Assign next validation task to a worker (work-pulling pattern)
+	 * Assign next validation task to a worker (locality-aware work-pulling pattern)
+	 * Each worker only gets tasks where the LHS attribute is local to its
+	 * co-located DataProvider
 	 */
-	private void assignNextTask(int workerId) {
-		if (this.remainingTasks.isEmpty()) {
-			// No more work
-			this.dependencyWorkersActive.set(workerId, false);
+	private void assignNextValidationTask(int dependencyWorkerId) {
+		Queue<int[]> workerQueue = this.workerTaskQueues.get(dependencyWorkerId);
+
+		if (workerQueue == null || workerQueue.isEmpty()) {
+			// No more work for this worker
+			this.dependencyWorkersActive.set(dependencyWorkerId, false);
 
 			// Check if all workers are done
 			if (this.dependencyWorkersActive.stream().noneMatch(b -> b)) {
-				this.resultCollector.tell(new ResultCollector.FinalizeMessage());
-				long discoveryTime = System.currentTimeMillis() - this.startTime;
-				this.getContext().getLog().info("Finished mining within {} ms!", discoveryTime);
-				this.getContext().getLog().info("Total Inclusion Dependencies found: {}", this.totalINDsFound);
+				// Double-check: only finalize if we've actually started processing tasks
+				// (i.e., completedTasks > 0 or totalTasks == 0)
+				if (this.completedTasks > 0 || this.totalTasks == 0) {
+					this.resultCollector.tell(new ResultCollector.FinalizeMessage());
+					long discoveryTime = System.currentTimeMillis() - this.startTime;
+					this.getContext().getLog().info("Finished mining within {} ms!", discoveryTime);
+					this.getContext().getLog().info("Total Inclusion Dependencies found: {}", this.totalINDsFound);
+				} else {
+					this.getContext().getLog().debug(
+							"All workers inactive but no tasks completed yet - waiting for task processing to begin");
+				}
 			}
 			return;
 		}
 
-		// Get next task
-		int[] task = this.remainingTasks.poll();
+		// Get next task from this worker's queue
+		int[] task = workerQueue.poll();
 		int lhsAttr = task[0];
 		int rhsAttr = task[1];
+
+		// Verify locality (LHS should be local to this worker's DataProvider)
+		int lhsDataProviderId = this.attribute2dataProvider[lhsAttr];
+		int workerDataProviderId = this.worker2dataProvider.get(dependencyWorkerId);
+
+		if (lhsDataProviderId != workerDataProviderId) {
+			this.getContext().getLog().error(
+					"LOCALITY VIOLATION: Worker-{} (DP-{}) assigned task with LHS attr {} from DP-{}",
+					dependencyWorkerId, workerDataProviderId, lhsAttr, lhsDataProviderId);
+		}
 
 		// Find DataProvider for RHS attribute
 		int rhsDataProviderId = this.attribute2dataProvider[rhsAttr];
 		ActorRef<DataProvider.Message> rhsDataProvider = this.dataProviders.get(rhsDataProviderId);
 
 		// Send task to worker
-		this.dependencyWorkers.get(workerId).tell(
-				new DependencyWorker.ValidateTaskMessage(lhsAttr, rhsAttr, rhsDataProvider));
+		this.dependencyWorkers.get(dependencyWorkerId)
+				.tell(new DependencyWorker.ValidateTaskMessage(lhsAttr, rhsAttr, rhsDataProvider));
+		this.dependencyWorkersActive.set(dependencyWorkerId, true);
 
-		this.dependencyWorkersActive.set(workerId, true);
-
-		this.getContext().getLog().debug("Assigned task ({} ⊆ {}?) to DependencyWorker-{}", lhsAttr, rhsAttr, workerId);
+		this.getContext().getLog().debug("Assigned task ({} ⊆ {}?) to DependencyWorker-{} (local LHS)", lhsAttr,
+				rhsAttr, dependencyWorkerId);
 	}
 
 	// * DEBUG OUTPUT * //
@@ -925,22 +936,15 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		// Log DependencyWorker information
 		this.getContext().getLog().info("Total DependencyWorkers: {}", this.dependencyWorkers.size());
 		for (int workerId = 0; workerId < this.dependencyWorkers.size(); workerId++) {
-			IntList attributeIds = new IntArrayList();
-			if (this.attribute2worker != null) {
-				for (int attribute = 0; attribute < this.attribute2worker.length; attribute++) {
-					if (this.attribute2worker[attribute] == workerId) {
-						attributeIds.add(attribute);
-					}
-				}
-			}
-			this.getContext().getLog().info("  Worker-{}: {} attributes -> {}",
-					workerId, attributeIds.size(), attributeIds);
+			Integer localDataProviderId = this.worker2dataProvider.get(workerId);
+			this.getContext().getLog().info("DependencyWorker-{}: co-located with DataProvider-{}",
+					workerId, localDataProviderId);
 		}
 
 		// Log co-location mapping
 		this.getContext().getLog().info("DataProvider to Workers co-location mapping:");
 		for (Map.Entry<Integer, List<Integer>> entry : this.dataProvider2workers.entrySet()) {
-			this.getContext().getLog().info("  DataProvider-{} -> Workers: {}",
+			this.getContext().getLog().info("  DataProvider-{} -> DependencyWorkers: {}",
 					entry.getKey(), entry.getValue());
 		}
 
