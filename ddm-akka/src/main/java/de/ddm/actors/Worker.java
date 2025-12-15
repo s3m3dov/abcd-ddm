@@ -42,7 +42,6 @@ public class Worker extends AbstractBehavior<Worker.Message> {
         super(context);
         Reaper.watchWithDefaultReaper(this.getContext().getSelf());
 
-
         final int numWorkers = SystemConfigurationSingleton.get().getNumWorkers();
         if (numWorkers > 0) {
             // Spawn DataProvider BEFORE DependencyWorker to ensure it's available
@@ -55,9 +54,9 @@ public class Worker extends AbstractBehavior<Worker.Message> {
                 context.spawn(
                         DependencyWorker.create(this.dataProvider), // Pass DataProvider reference
                         DependencyWorker.DEFAULT_NAME + "-" + i,
-                        DispatcherSelector.fromConfig("akka.worker-pinned-dispatcher")
-                );
+                        DispatcherSelector.fromConfig("akka.worker-pinned-dispatcher"));
             }
+            context.getLog().info("{} DependencyWorker actors spawned", numWorkers);
         }
     }
 
