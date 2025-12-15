@@ -704,32 +704,32 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		logAttributeDistribution("BEFORE rebalancing", currentCounts);
 
 		// For each awaiting DataProvider, steal attributes to reach target
-		for (int awaitingDPId : this.awaitingDataProviderIds) {
+		for (int awaitingDataProvider : this.awaitingDataProviderIds) {
 			int needed = targetAttributesPerDP;
 			Int2IntMap attribute2sourceDP = new Int2IntOpenHashMap(); // Track original source before update
 
 			// Steal from DataProviders that have more than target
-			for (int sourceDP = 0; sourceDP < numDataProviders; sourceDP++) {
-				if (sourceDP == awaitingDPId)
+			for (int sourceDataProvider = 0; sourceDataProvider < numDataProviders; sourceDataProvider++) {
+				if (sourceDataProvider == awaitingDataProvider)
 					continue;
 
-				while (currentCounts[sourceDP] > targetAttributesPerDP && needed > 0) {
+				while (currentCounts[sourceDataProvider] > targetAttributesPerDP && needed > 0) {
 					// Find a random attribute owned by sourceDP
-					int attribute = findRandomAttribute(sourceDP);
+					int attribute = findRandomAttribute(sourceDataProvider);
 
 					// Track the source BEFORE updating mapping
-					attribute2sourceDP.put(attribute, sourceDP);
+					attribute2sourceDP.put(attribute, sourceDataProvider);
 
 					// Update mapping immediately
-					this.attribute2dataProvider[attribute] = awaitingDPId;
-					currentCounts[sourceDP]--;
-					currentCounts[awaitingDPId]++;
+					this.attribute2dataProvider[attribute] = awaitingDataProvider;
+					currentCounts[sourceDataProvider]--;
+					currentCounts[awaitingDataProvider]++;
 					needed--;
 				}
 			}
 
 			// Send MoveDataMessages to source DataProviders
-			sendMoveDataMessages(awaitingDPId, attribute2sourceDP);
+			sendMoveDataMessages(awaitingDataProvider, attribute2sourceDP);
 
 			// Track source DataProviders involved in rebalancing
 			for (int sourceDP : attribute2sourceDP.values()) {
