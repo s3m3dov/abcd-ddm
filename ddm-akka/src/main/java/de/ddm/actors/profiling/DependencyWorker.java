@@ -150,7 +150,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 	private Behavior<Message> handle(ValidateTaskMessage message) {
 		this.getContext().getLog().info("DependencyWorker-{} received validation task: {} ⊆ {}",
-                this.dependencyWorkerId, message.getLhsAttributeId(), message.getRhsAttributeId());
+				this.dependencyWorkerId, message.getLhsAttributeId(), message.getRhsAttributeId());
 
 		// Store current task
 		this.currentTask = message;
@@ -158,10 +158,11 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		this.rhsData = null;
 
 		// Request both columns from their respective DataProviders
+		// Include LargeMessageProxy reference for receiving large responses
 		this.localDataProvider.tell(new DataProvider.RequestColumnMessage(
-				message.getLhsAttributeId(), this.getContext().getSelf()));
+				message.getLhsAttributeId(), this.getContext().getSelf(), this.largeMessageProxy));
 		message.getRhsDataProvider().tell(new DataProvider.RequestColumnMessage(
-				message.getRhsAttributeId(), this.getContext().getSelf()));
+				message.getRhsAttributeId(), this.getContext().getSelf(), this.largeMessageProxy));
 
 		return this;
 	}
@@ -170,10 +171,12 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		// Store fetched column data
 		if (message.getAttributeId() == this.currentTask.getLhsAttributeId()) {
 			this.lhsData = message.getColumnData();
-			this.getContext().getLog().debug("DependencyWorker-{} received LHS data for attribute {}", this.dependencyWorkerId, message.getAttributeId());
+			this.getContext().getLog().debug("DependencyWorker-{} received LHS data for attribute {}",
+					this.dependencyWorkerId, message.getAttributeId());
 		} else if (message.getAttributeId() == this.currentTask.getRhsAttributeId()) {
 			this.rhsData = message.getColumnData();
-			this.getContext().getLog().debug("DependencyWorker-{} received RHS data for attribute {}", this.dependencyWorkerId, message.getAttributeId());
+			this.getContext().getLog().debug("DependencyWorker-{} received RHS data for attribute {}",
+					this.dependencyWorkerId, message.getAttributeId());
 		}
 
 		// When both ready, execute validation
@@ -198,7 +201,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 		this.getContext().getLog().debug(
 				"DependencyWorker-{} validation result for {} ⊆ {}: {} (LHS size: {}, RHS size: {}, LHS sample: {}, RHS sample: {})",
-                this.dependencyWorkerId,
+				this.dependencyWorkerId,
 				this.currentTask.getLhsAttributeId(), this.lhsData.size(),
 				this.currentTask.getRhsAttributeId(), this.rhsData.size(),
 				isIND, lhsSample, rhsSample);

@@ -569,7 +569,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int dataProviderId = this.dataProviders.indexOf(localDataProvider);
 		this.dataProvider2workers.computeIfAbsent(dataProviderId, k -> new ArrayList<>()).add(workerId);
 
-		this.getContext().getLog().info("Registered Worker-{} co-located with DataProvider-{}",
+		this.getContext().getLog().info("Registered DependencyWorker-{} co-located with DataProvider-{}",
 				workerId, dataProviderId);
 
 		// Send the assigned worker ID back to the worker
@@ -884,7 +884,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		this.dependencyWorkersActive.set(workerId, true);
 
-		this.getContext().getLog().debug("Assigned task ({} ⊆ {}?) to worker-{}", lhsAttr, rhsAttr, workerId);
+		this.getContext().getLog().debug("Assigned task ({} ⊆ {}?) to DependencyWorker-{}", lhsAttr, rhsAttr, workerId);
 	}
 
 	// * DEBUG OUTPUT * //
