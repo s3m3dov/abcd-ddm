@@ -189,8 +189,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private final List<DependencyWorkerRegistrationMessage> pendingWorkerRegistrations;
 
 	// Validation phase state
-	private boolean[][] candidateMatrix;
-	private List<IntList> worker2attributes;
+	private Queue<int[]> remainingTasks; // Queue of [lhsAttr, rhsAttr] pairs
+	private int totalTasks;
+	private int completedTasks;
 
 	// Rebalancing state
 	private IntSet rebalancingDataProviderIds = new IntOpenHashSet(); // IDs of DataProviders involved in rebalancing
@@ -477,8 +478,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	}
 
 	private Behavior<Message> handle(ResultMessage message) {
-		this.getContext().getLog().info("ResultMessage! {} INDs from worker {}", message.getLhss().length,
-				message.getWorkerId());
+		this.completedTasks++;
+		this.getContext().getLog().info("ResultMessage! {} INDs from worker {} ({}/{} tasks completed)",
+				message.getLhss().length, message.getWorkerId(), this.completedTasks, this.totalTasks);
 
 		// Create Inclusion Dependency objects from the results
 		List<InclusionDependency> inds = new ArrayList<>(message.getLhss().length);
@@ -490,47 +492,13 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 
 		// Send Inclusion Dependency objects to the result collector
-		this.resultCollector.tell(new ResultCollector.ResultMessage(inds));
-
-		// Find more work for the dependency worker
-		int workerId = message.getWorkerId();
-		for (int attribute : this.worker2attributes.get(workerId)) {
-			for (int otherAttribute = 0; otherAttribute < this.attribute2name.length; otherAttribute++) {
-				if (!this.candidateMatrix[attribute][otherAttribute]) {
-					// Collect all the worker's attributes that still require validation with the
-					// current other attribute and mark them validated
-					IntList untestedAttributes = new IntArrayList(this.worker2attributes.get(workerId).size());
-					for (int untestedAttributeCandidate : this.worker2attributes.get(workerId)) {
-						if (!this.candidateMatrix[otherAttribute][untestedAttributeCandidate]) {
-							this.candidateMatrix[otherAttribute][untestedAttributeCandidate] = true;
-							this.candidateMatrix[untestedAttributeCandidate][otherAttribute] = true;
-							untestedAttributes.add(untestedAttributeCandidate);
-						}
-					}
-
-					// Tell the owner of the other attribute to send that attribute's column to the
-					// worker for validation
-					int otherWorkerId = this.attribute2worker[otherAttribute];
-					this.dependencyWorkers.get(otherWorkerId).tell(new DependencyWorker.ShareForValidationMessage(
-							otherAttribute, untestedAttributes.toIntArray(), this.dependencyWorkers.get(workerId),
-							workerId, this.dependencyWorkerLMPs.get(workerId)));
-
-					return this;
-				}
-			}
+		if (!inds.isEmpty()) {
+			this.resultCollector.tell(new ResultCollector.ResultMessage(inds));
 		}
 
-		// Set the worker to inactive, because no further validation work could be found
-		// for its attributes
-		this.dependencyWorkersActive.set(workerId, false);
+		// Assign next task to this worker (work-pulling)
+		this.assignNextTask(message.getWorkerId());
 
-		// End the program when
-		// all INDs have been checked, which means all workers are inactive now
-		if (this.dependencyWorkersActive.stream().noneMatch(b -> b)) {
-			this.resultCollector.tell(new ResultCollector.FinalizeMessage());
-			long discoveryTime = System.currentTimeMillis() - this.startTime;
-			this.getContext().getLog().info("Finished mining within {} ms!", discoveryTime);
-		}
 		return this;
 	}
 
@@ -599,7 +567,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				workerId, dataProviderId);
 
 		// Send the assigned worker ID back to the worker
-		dependencyWorker.tell(new DependencyWorker.SetIdMessage(workerId));
+		dependencyWorker.tell(new DependencyWorker.SetWorkerIdMessage(workerId));
 	}
 
 	/**
@@ -849,44 +817,67 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int numAttributes = this.attribute2name.length;
 		int numWorkers = this.dependencyWorkers.size();
 
-		// Check that all workers are inactive; otherwise, we wait for a status update
-		// of a still active worker to initiate the validation phase
-		if (this.dependencyWorkersActive.stream().anyMatch(b -> b))
+		// Check that all DataProviders are inactive; otherwise, wait
+		if (this.dataProvidersActive.stream().anyMatch(b -> b))
 			return;
 
-		// Initialize attribute-to-worker mapping considering locality
-		// Assign attributes to workers co-located with their DataProvider
-		this.mapAttributesToWorkers();
+		this.getContext().getLog().info("Initiating validation phase with {} attributes and {} workers",
+				numAttributes, numWorkers);
 
-		// Create an IND candidate matrix to keep track of the candidate validations
-		this.candidateMatrix = new boolean[numAttributes][];
-		for (int i = 0; i < numAttributes; i++)
-			this.candidateMatrix[i] = new boolean[numAttributes];
-
-		// Create a worker-to-attributes mapping to support the initial candidate
-		// generation
-		this.worker2attributes = new ArrayList<>(numWorkers);
-		for (int workerId = 0; workerId < numWorkers; workerId++)
-			this.worker2attributes.add(new IntArrayList((int) Math.ceil((float) numAttributes / (float) numWorkers)));
-		for (int attribute = 0; attribute < numAttributes; attribute++)
-			this.worker2attributes.get(this.attribute2worker[attribute]).add(attribute);
-
-		// Send a ValidateLocalCandidatesMessage to all workers and mark their
-		// candidates as validated. The workers will
-		// then receive further validation tasks via work pulling, i.e., whenever they
-		// report results.
-		for (int workerId = 0; workerId < numWorkers; workerId++) {
-			this.dependencyWorkers.get(workerId).tell(new DependencyWorker.ValidateLocalCandidatesMessage());
-			IntList workerAttributes = this.worker2attributes.get(workerId);
-			for (int i = 0; i < workerAttributes.size(); i++) {
-				for (int j = i; j < workerAttributes.size(); j++) {
-					this.candidateMatrix[workerAttributes.getInt(i)][workerAttributes.getInt(j)] = true;
-					this.candidateMatrix[workerAttributes.getInt(j)][workerAttributes.getInt(i)] = true;
+		// Generate all unary IND candidates (all attribute pairs)
+		this.remainingTasks = new LinkedList<>();
+		for (int lhs = 0; lhs < numAttributes; lhs++) {
+			for (int rhs = 0; rhs < numAttributes; rhs++) {
+				if (lhs != rhs) {
+					this.remainingTasks.add(new int[] { lhs, rhs });
 				}
 			}
-
-			this.dependencyWorkersActive.set(workerId, true);
 		}
+
+		this.totalTasks = this.remainingTasks.size();
+		this.completedTasks = 0;
+
+		this.getContext().getLog().info("Generated {} validation tasks", this.totalTasks);
+
+		// Assign initial task to each worker
+		for (int workerId = 0; workerId < numWorkers; workerId++) {
+			this.assignNextTask(workerId);
+		}
+	}
+
+	/**
+	 * Assign next validation task to a worker (work-pulling pattern)
+	 */
+	private void assignNextTask(int workerId) {
+		if (this.remainingTasks.isEmpty()) {
+			// No more work
+			this.dependencyWorkersActive.set(workerId, false);
+
+			// Check if all workers are done
+			if (this.dependencyWorkersActive.stream().noneMatch(b -> b)) {
+				this.resultCollector.tell(new ResultCollector.FinalizeMessage());
+				long discoveryTime = System.currentTimeMillis() - this.startTime;
+				this.getContext().getLog().info("Finished mining within {} ms!", discoveryTime);
+			}
+			return;
+		}
+
+		// Get next task
+		int[] task = this.remainingTasks.poll();
+		int lhsAttr = task[0];
+		int rhsAttr = task[1];
+
+		// Find DataProvider for RHS attribute
+		int rhsDataProviderId = this.attribute2dataProvider[rhsAttr];
+		ActorRef<DataProvider.Message> rhsDataProvider = this.dataProviders.get(rhsDataProviderId);
+
+		// Send task to worker
+		this.dependencyWorkers.get(workerId).tell(
+				new DependencyWorker.ValidateTaskMessage(lhsAttr, rhsAttr, rhsDataProvider));
+
+		this.dependencyWorkersActive.set(workerId, true);
+
+		this.getContext().getLog().debug("Assigned task ({} ⊆ {}?) to worker-{}", lhsAttr, rhsAttr, workerId);
 	}
 
 	// * DEBUG OUTPUT * //

@@ -72,19 +72,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     public static class RequestColumnMessage implements Message {
         private static final long serialVersionUID = -3571780705578600223L;
         int attributeId;
-        ActorRef<ResponseColumnMessage> replyTo;
-    }
-
-    /**
-     * Response message containing requested column data
-     */
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class ResponseColumnMessage implements Message {
-        private static final long serialVersionUID = -7074598491023113482L;
-        int attributeId;
-        Set<String> columnData;
+        ActorRef<DependencyWorker.Message> replyTo;
     }
 
     /**
@@ -301,8 +289,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 "DataProvider-{} accepting {} columns from DataProvider-{}",
                 this.dataProviderId,
                 message.getColumns().size(),
-                message.getSourceDataProviderId()
-        );
+                message.getSourceDataProviderId());
 
         // Accept the columns
         for (Map.Entry<Integer, Set<String>> entry : message.getColumns().entrySet()) {
@@ -336,7 +323,8 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
             columnData = Collections.emptySet();
         }
 
-        message.getReplyTo().tell(new ResponseColumnMessage(message.getAttributeId(), columnData));
+        // Send ColumnDataMessage directly to DependencyWorker
+        message.getReplyTo().tell(new DependencyWorker.ColumnDataMessage(message.getAttributeId(), columnData));
 
         return this;
     }
