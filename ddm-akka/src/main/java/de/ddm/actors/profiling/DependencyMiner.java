@@ -550,6 +550,10 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		// DataProvider ID is its index in the list
 		int dataProviderId = this.dataProviders.size() - 1;
+
+		// Send ID immediately
+		dataProvider.tell(new DataProvider.SetDataProviderIdMessage(dataProviderId));
+
 		this.getContext().getLog().info("Registered DataProvider-{}", dataProviderId);
 	}
 
@@ -671,7 +675,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 					attributes.add(attribute);
 
 			this.dataProviders.get(dataProviderId)
-					.tell(new DataProvider.SetIdAndAttributesMessage(dataProviderId, attributes.toArray(new int[0])));
+					.tell(new DataProvider.InitialAttributesMessage(attributes.toArray(new int[0])));
 			this.dataProvidersActive.set(dataProviderId, true);
 		}
 	}
@@ -726,11 +730,11 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 			// Send MoveDataMessages to source DataProviders
 			sendMoveDataMessages(awaitingDPId, attribute2sourceDP);
-		}
 
-		// Track all involved DataProviders for rebalancing completion
-		for (int dpId = 0; dpId < numDataProviders; dpId++) {
-			this.rebalancingDataProviderIds.add(dpId);
+			// Track source DataProviders involved in rebalancing
+			for (int sourceDP : attribute2sourceDP.values()) {
+				this.rebalancingDataProviderIds.add(sourceDP);
+			}
 		}
 
 		// Clear awaiting list
@@ -760,7 +764,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	/**
 	 * Send MoveDataMessages to source DataProviders to move attributes to target.
 	 */
-	private void sendMoveDataMessages(int targetDPId, Int2IntMap attribute2sourceDP) {
+	private void sendMoveDataMessages(int toDataProviderId, Int2IntMap attribute2sourceDP) {
 		// Group attributes by source DataProvider
 		Int2ObjectMap<IntList> sourceDP2attributes = new Int2ObjectArrayMap<>();
 		for (Int2IntMap.Entry entry : attribute2sourceDP.int2IntEntrySet()) {
@@ -770,21 +774,20 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 
 		// Send MoveDataMessage to each source
-		ActorRef<DataProvider.Message> targetDP = this.dataProviders.get(targetDPId);
-		ActorRef<LargeMessageProxy.Message> targetLMP = this.dataProviderLMPs.get(targetDPId);
+		ActorRef<DataProvider.Message> toDataProvider = this.dataProviders.get(toDataProviderId);
+		ActorRef<LargeMessageProxy.Message> toDataProviderLMP = this.dataProviderLMPs.get(toDataProviderId);
 
 		for (Int2ObjectMap.Entry<IntList> entry : sourceDP2attributes.int2ObjectEntrySet()) {
-			int sourceDPId = entry.getIntKey();
+			int fromDataProviderId = entry.getIntKey();
 			int[] attributes = entry.getValue().toIntArray();
 
-			DataProvider.MoveDataMessage msg = new DataProvider.MoveDataMessage(
-					attributes, targetDPId, targetDP, targetLMP, sourceDP2attributes.size());
+			DataProvider.MoveDataMessage msg = new DataProvider.MoveDataMessage(attributes, toDataProviderId, toDataProvider, toDataProviderLMP, sourceDP2attributes.size());
 
-			this.dataProviders.get(sourceDPId).tell(msg);
-			this.dataProvidersActive.set(sourceDPId, true);
+			this.dataProviders.get(fromDataProviderId).tell(msg);
+			this.dataProvidersActive.set(fromDataProviderId, true);
 		}
 
-		this.dataProvidersActive.set(targetDPId, true);
+		this.dataProvidersActive.set(toDataProviderId, true);
 	}
 
 	/**
@@ -861,7 +864,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				this.resultCollector.tell(new ResultCollector.FinalizeMessage());
 				long discoveryTime = System.currentTimeMillis() - this.startTime;
 				this.getContext().getLog().info("Finished mining within {} ms!", discoveryTime);
-                this.getContext().getLog().info("Total Inclusion Dependencies found: {}", this.totalINDsFound);
+				this.getContext().getLog().info("Total Inclusion Dependencies found: {}", this.totalINDsFound);
 			}
 			return;
 		}
