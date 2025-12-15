@@ -297,9 +297,12 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(AcceptDataMessage message) {
-
-        // Initialize this worker's ID
-        this.dataProviderId = message.getSourceDataProviderId();
+        this.getContext().getLog().info(
+                "DataProvider-{} accepting {} columns from DataProvider-{}",
+                this.dataProviderId,
+                message.getColumns().size(),
+                message.getSourceDataProviderId()
+        );
 
         // Accept the columns
         for (Map.Entry<Integer, Set<String>> entry : message.getColumns().entrySet()) {
@@ -374,7 +377,8 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         if (this.sortedColumns != null)
             return; // Already transitioned
 
-        this.getContext().getLog().info("DataProvider transitioning to validation phase");
+        this.getContext().getLog().info("DataProvider-{} transitioning to validation phase - sorting {} columns",
+                this.dataProviderId, this.columns != null ? this.columns.size() : 0);
         this.sortColumns();
     }
 
