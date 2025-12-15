@@ -470,8 +470,12 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         // Calculate memory exhaustion
         boolean overloaded = this.availableMemory < this.usedMemoryPredicted;
 
-        // Answer with status
-        this.dependencyMiner.tell(new DependencyMiner.StatusMessage(this.dataProviderId, false, overloaded));
+        // Answer with status including current data size
+        this.dependencyMiner.tell(new DependencyMiner.StatusMessage(
+                this.dataProviderId,
+                false,
+                overloaded,
+                this.usedMemoryPredicted)); // Report predicted memory usage as data size
 
         this.getContext().getLog().info("DataProvider-{} Status: overloaded = {} ({} / {})", this.dataProviderId,
                 overloaded,

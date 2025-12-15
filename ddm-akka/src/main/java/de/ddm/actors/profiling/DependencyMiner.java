@@ -64,6 +64,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int dataProviderId;
 		boolean active;
 		boolean overloaded;
+		long currentDataSize; // Current data size in bytes (valueCount * avgValueSize)
 	}
 
 	@Getter
@@ -135,6 +136,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.dataProviderLMPs = new ArrayList<>();
 		this.dataProvidersActive = new BooleanArrayList();
 		this.dataProvidersOverloaded = new BooleanArrayList();
+		this.dataProviderSizes = new ArrayList<>();
 
 		this.dependencyWorkers = new ArrayList<>();
 		this.dependencyWorkerLMPs = new ArrayList<>();
@@ -168,6 +170,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private final List<ActorRef<LargeMessageProxy.Message>> dataProviderLMPs;
 	private final BooleanList dataProvidersActive;
 	private final BooleanList dataProvidersOverloaded;
+	private final List<Long> dataProviderSizes; // Current data size in bytes for each DataProvider
 
 	// DependencyWorker tracking (multiple per worker node)
 	private final List<ActorRef<DependencyWorker.Message>> dependencyWorkers;
@@ -355,6 +358,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		this.dataProvidersActive.set(message.getDataProviderId(), message.isActive());
 		this.dataProvidersOverloaded.set(message.getDataProviderId(), message.isOverloaded());
+		this.dataProviderSizes.set(message.getDataProviderId(), message.getCurrentDataSize());
 
 		// Track rebalancing completion
 		if (this.isRebalancing()) {
@@ -547,6 +551,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.dataProviderLMPs.add(dataProviderLMP);
 		this.dataProvidersActive.add(false);
 		this.dataProvidersOverloaded.add(false);
+		this.dataProviderSizes.add(0L); // Initialize with 0 size
 
 		// DataProvider ID is its index in the list
 		int dataProviderId = this.dataProviders.size() - 1;
@@ -682,17 +687,27 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	// * REBALANCING * //
 	/**
-	 * Trigger rebalancing by redistributing attributes evenly across all
-	 * DataProviders,
-	 * including those awaiting rebalancing.
+	 * Trigger rebalancing by redistributing attributes across all DataProviders,
+	 * considering both data size and attribute count for balanced distribution.
 	 */
 	private void triggerRebalancing() {
 		int numDataProviders = this.dataProviders.size();
 		int numAttributes = this.attribute2name.length;
+
+		// Calculate total data size across all DataProviders
+		long totalDataSize = 0;
+		for (int dpId = 0; dpId < numDataProviders; dpId++) {
+			totalDataSize += this.dataProviderSizes.get(dpId);
+		}
+
+		// Calculate targets
+		long targetSizePerDP = totalDataSize / numDataProviders;
 		int targetAttributesPerDP = numAttributes / numDataProviders;
 
-		this.getContext().getLog().info("Rebalancing {} attributes across {} DataProviders (target: {} each)",
-				numAttributes, numDataProviders, targetAttributesPerDP);
+		this.getContext().getLog().info(
+				"Rebalancing {} attributes ({} MB total) across {} DataProviders (target: {} attributes, {} MB each)",
+				numAttributes, totalDataSize / 1024 / 1024, numDataProviders,
+				targetAttributesPerDP, targetSizePerDP / 1024 / 1024);
 
 		// Calculate current distribution
 		int[] currentCounts = new int[numDataProviders];
@@ -702,34 +717,60 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		// Log BEFORE state
 		logAttributeDistribution("BEFORE rebalancing", currentCounts);
+		logSizeDistribution("BEFORE rebalancing");
 
 		// For each awaiting DataProvider, steal attributes to reach target
-		for (int awaitingDataProvider : this.awaitingDataProviderIds) {
-			int needed = targetAttributesPerDP;
-			Int2IntMap attribute2sourceDP = new Int2IntOpenHashMap(); // Track original source before update
+		for (int awaitingDPId : this.awaitingDataProviderIds) {
+			Int2IntMap attribute2sourceDP = new Int2IntOpenHashMap();
 
-			// Steal from DataProviders that have more than target
-			for (int sourceDataProvider = 0; sourceDataProvider < numDataProviders; sourceDataProvider++) {
-				if (sourceDataProvider == awaitingDataProvider)
+			// Calculate how much we need (consider both size and count)
+			long currentSize = this.dataProviderSizes.get(awaitingDPId);
+			int currentCount = currentCounts[awaitingDPId];
+
+			// Estimate average size per attribute across all DataProviders
+			long avgSizePerAttribute = totalDataSize / numAttributes;
+
+			// Steal from DataProviders that are overloaded (by size or count)
+			for (int sourceDP = 0; sourceDP < numDataProviders; sourceDP++) {
+				if (sourceDP == awaitingDPId)
 					continue;
 
-				while (currentCounts[sourceDataProvider] > targetAttributesPerDP && needed > 0) {
-					// Find a random attribute owned by sourceDP
-					int attribute = findRandomAttribute(sourceDataProvider);
+				long sourceDPSize = this.dataProviderSizes.get(sourceDP);
+				int sourceDPCount = currentCounts[sourceDP];
+
+				// Steal if source has more than target (prioritize size, but consider count)
+				while ((sourceDPSize > targetSizePerDP || sourceDPCount > targetAttributesPerDP)
+						&& (currentSize < targetSizePerDP || currentCount < targetAttributesPerDP)) {
+
+					// Find an attribute to move from sourceDP
+					int attribute = findRandomAttribute(sourceDP);
+
+					// Estimate the size of this attribute (use average as approximation)
+					long estimatedAttributeSize = avgSizePerAttribute;
 
 					// Track the source BEFORE updating mapping
-					attribute2sourceDP.put(attribute, sourceDataProvider);
+					attribute2sourceDP.put(attribute, sourceDP);
 
 					// Update mapping immediately
-					this.attribute2dataProvider[attribute] = awaitingDataProvider;
-					currentCounts[sourceDataProvider]--;
-					currentCounts[awaitingDataProvider]++;
-					needed--;
+					this.attribute2dataProvider[attribute] = awaitingDPId;
+					currentCounts[sourceDP]--;
+					currentCounts[awaitingDPId]++;
+
+					// Update estimated sizes
+					sourceDPSize -= estimatedAttributeSize;
+					currentSize += estimatedAttributeSize;
+					sourceDPCount--;
+					currentCount++;
+
+					// Stop if we've reached a reasonable balance
+					if (currentCount >= targetAttributesPerDP && currentSize >= targetSizePerDP * 0.9) {
+						break;
+					}
 				}
 			}
 
 			// Send MoveDataMessages to source DataProviders
-			sendMoveDataMessages(awaitingDataProvider, attribute2sourceDP);
+			sendMoveDataMessages(awaitingDPId, attribute2sourceDP);
 
 			// Track source DataProviders involved in rebalancing
 			for (int sourceDP : attribute2sourceDP.values()) {
@@ -739,6 +780,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		// Clear awaiting list
 		this.awaitingDataProviderIds.clear();
+
 		// Log AFTER state
 		logAttributeDistribution("AFTER rebalancing", currentCounts);
 
@@ -781,7 +823,8 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			int fromDataProviderId = entry.getIntKey();
 			int[] attributes = entry.getValue().toIntArray();
 
-			DataProvider.MoveDataMessage msg = new DataProvider.MoveDataMessage(attributes, toDataProviderId, toDataProvider, toDataProviderLMP, sourceDP2attributes.size());
+			DataProvider.MoveDataMessage msg = new DataProvider.MoveDataMessage(attributes, toDataProviderId,
+					toDataProvider, toDataProviderLMP, sourceDP2attributes.size());
 
 			this.dataProviders.get(fromDataProviderId).tell(msg);
 			this.dataProvidersActive.set(fromDataProviderId, true);
@@ -815,6 +858,21 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			this.getContext().getLog().info("{} - DataProvider-{}: {} attributes -> {}",
 					label, dpId, attributeIds.size(), attributeIds);
 		}
+	}
+
+	/**
+	 * Log data size distribution across DataProviders
+	 */
+	private void logSizeDistribution(String label) {
+		StringBuilder summary = new StringBuilder(label + " - Sizes (MB): ");
+		for (int dpId = 0; dpId < this.dataProviders.size(); dpId++) {
+			long sizeInMB = this.dataProviderSizes.get(dpId) / 1024 / 1024;
+			summary.append("DP-").append(dpId).append(": ").append(sizeInMB);
+			if (dpId < this.dataProviders.size() - 1) {
+				summary.append(", ");
+			}
+		}
+		this.getContext().getLog().info(summary.toString());
 	}
 
 	// * VALIDATION PHASE * //
