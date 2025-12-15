@@ -597,6 +597,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		this.getContext().getLog().info("Registered Worker-{} co-located with DataProvider-{}",
 				workerId, dataProviderId);
+
+		// Send the assigned worker ID back to the worker
+		dependencyWorker.tell(new DependencyWorker.SetIdMessage(workerId));
 	}
 
 	/**
@@ -658,7 +661,8 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			List<Integer> colocatedWorkers = this.dataProvider2workers.get(dataProviderId);
 
 			if (colocatedWorkers == null || colocatedWorkers.isEmpty()) {
-				// In case no co-located workers, use round-robin across all workers (should not happen)
+				// In case no co-located workers, use round-robin across all workers (should not
+				// happen)
 				this.getContext().getLog().warn(
 						"No co-located workers found for DataProvider-{}, using round-robin for attribute {}",
 						dataProviderId, attribute);
