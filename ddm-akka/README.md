@@ -107,6 +107,13 @@ java -jar target/ddm-akka.jar master -es true
 
 > **Note:** The `-es true` flag is for demo purposes only. Press `Enter` to terminate. A working solution should end itself automatically once complete. Skip this flag (`-es false` or omit it) for production runs.
 
+### Local Undistributed Run (Single Process)
+Run master and workers in a single process (not distributed):
+
+```bash
+java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar master -w 4
+```
+
 ### Local Distributed Run (Single Machine)
 
 Run master and multiple workers on the same machine using different terminal windows:
