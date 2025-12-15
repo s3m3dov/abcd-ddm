@@ -38,6 +38,14 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 	@Getter
 	@NoArgsConstructor
+	@AllArgsConstructor
+	public static class SetIdMessage implements Message {
+		private static final long serialVersionUID = -3456789012345678901L;
+		int workerId;
+	}
+
+	@Getter
+	@NoArgsConstructor
 	public static class ValidateLocalCandidatesMessage implements Message {
 		private static final long serialVersionUID = -2765506199949499328L;
 	}
@@ -63,6 +71,15 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		List<String> column;
 		int[] untestedAttributes;
 		int workerId;
+	}
+
+	@Getter
+	@NoArgsConstructor
+	@AllArgsConstructor
+	public static class ResultMessage implements Message {
+		private static final long serialVersionUID = -1234567890123456789L;
+		int[] lhss;
+		int[] rhss;
 	}
 
 	////////////////////////
@@ -103,6 +120,12 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	private ActorRef<DependencyMiner.Message> dependencyMiner;
 	private int workerId = -1;
 
+	// Result accumulation state
+	private int numHelpers;
+	private int receivedResults;
+	private final IntList lhss = new IntArrayList();
+	private final IntList rhss = new IntArrayList();
+
 	////////////////////
 	// Actor Behavior //
 	////////////////////
@@ -111,9 +134,11 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	public Receive<Message> createReceive() {
 		return newReceiveBuilder()
 				.onMessage(ReceptionistListingMessage.class, this::handle)
+				.onMessage(SetIdMessage.class, this::handle)
 				.onMessage(ValidateLocalCandidatesMessage.class, this::handle)
 				.onMessage(ShareForValidationMessage.class, this::handle)
 				.onMessage(ValidateCandidatesMessage.class, this::handle)
+				.onMessage(ResultMessage.class, this::handle)
 				.build();
 	}
 
@@ -132,6 +157,12 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 							this.largeMessageProxy,
 							this.localDataProvider)); // Include DataProvider reference
 		}
+		return this;
+	}
+
+	private Behavior<Message> handle(SetIdMessage message) {
+		this.workerId = message.getWorkerId();
+		this.getContext().getLog().info("Worker ID set to {}", this.workerId);
 		return this;
 	}
 
@@ -209,6 +240,31 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		return this;
 	}
 
+	private Behavior<Message> handle(ResultMessage message) {
+		// Accumulate results from helpers (merged from DependencyWorkerCameo)
+		for (int lhs : message.getLhss())
+			this.lhss.add(lhs);
+		for (int rhs : message.getRhss())
+			this.rhss.add(rhs);
+
+		this.receivedResults++;
+
+		// When all helpers have reported, send combined results to miner
+		if (this.receivedResults == this.numHelpers) {
+			this.dependencyMiner.tell(new DependencyMiner.ResultMessage(
+					this.lhss.toIntArray(),
+					this.rhss.toIntArray(),
+					this.workerId));
+
+			// Reset for next round
+			this.lhss.clear();
+			this.rhss.clear();
+			this.receivedResults = 0;
+		}
+
+		return this;
+	}
+
 	/////////////////
 	// Actor Utils //
 	/////////////////
@@ -224,24 +280,21 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	private void spawnHelperActors() {
-		final int numWorkers = SystemConfigurationSingleton.get().getNumWorkers();
+		this.numHelpers = SystemConfigurationSingleton.get().getNumWorkers();
+		this.receivedResults = 0;
 
-		// Spawn a cameo actor for the helpers to externalize the combination of the
-		// results for miner
-		ActorRef<DependencyWorkerCameo.Message> cameo = this.getContext().spawn(
-				DependencyWorkerCameo.create(this.dependencyMiner, numWorkers, this.workerId),
-				DependencyWorkerCameo.DEFAULT_NAME,
-				DispatcherSelector.fromConfig("akka.worker-pool-dispatcher"));
+		this.getContext().getLog().info(
+				"Spawning {} DependencyWorkerHelper actors by DependencyWorker {}",
+				this.numHelpers, this.workerId);
 
 		// Spawn the helper actors - they will request data from DataProvider as needed
-        /*
-		this.dependencyWorkerHelpers = new ArrayList<>(numWorkers);
-		for (int id = 0; id < numWorkers; id++)
+		// This worker handles result aggregation
+		this.dependencyWorkerHelpers = new ArrayList<>(this.numHelpers);
+		for (int id = 0; id < this.numHelpers; id++)
 			this.dependencyWorkerHelpers.add(this.getContext().spawn(
-					DependencyWorkerHelper.create(this.localDataProvider, cameo),
+					DependencyWorkerHelper.create(this.localDataProvider, this.getContext().getSelf()),
 					DependencyWorkerHelper.DEFAULT_NAME + "_" + id,
 					DispatcherSelector.fromConfig("akka.worker-pool-dispatcher")));
-        */
 	}
 
 }
