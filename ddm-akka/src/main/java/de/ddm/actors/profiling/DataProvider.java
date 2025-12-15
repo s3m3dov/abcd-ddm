@@ -170,7 +170,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     /////////////////
 
     // Memory-related fields
-    private final float MEMORY_USAGE_THRESHOLD = 0.75f;
+    private final float MEMORY_USAGE_THRESHOLD = 0.70f;
     private final static long VALUE_COUNT_BEFORE_MEMORY_MEASUREMENT = 100000;
     private final long availableMemory;
     private long usedMemoryMeasured;
