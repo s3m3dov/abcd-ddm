@@ -785,6 +785,13 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.getContext().getLog().info("Initiating validation phase with {} attributes and {} workers",
 				numAttributes, numWorkers);
 
+		// Tell all DataProviders to transition to validation phase (sort columns and
+		// free memory)
+		this.getContext().getLog().info("Instructing all DataProviders to transition to validation phase");
+		for (ActorRef<DataProvider.Message> dataProvider : this.dataProviders) {
+			dataProvider.tell(new DataProvider.TransitionToValidationPhaseMessage());
+		}
+
 		// Generate per-worker task queues based on locality
 		// Each worker gets tasks where LHS attribute is local to its DataProvider
 		this.workerTaskQueues = new HashMap<>();

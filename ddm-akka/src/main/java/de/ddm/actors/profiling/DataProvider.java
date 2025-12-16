@@ -122,6 +122,16 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         String[] attributeNames;
     }
 
+    /**
+     * Message to trigger transition from loading phase to validation phase
+     * This will sort columns and free memory from loading phase structures
+     */
+    @Getter
+    @NoArgsConstructor
+    public static class TransitionToValidationPhaseMessage implements Message {
+        private static final long serialVersionUID = -9876543210987654L;
+    }
+
     ////////////////////////
     // Actor Construction //
     ////////////////////////
@@ -206,6 +216,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 .onMessage(AcceptDataMessage.class, this::handle)
                 .onMessage(RequestColumnMessage.class, this::handle)
                 .onMessage(DataInfoDebugMessage.class, this::handle)
+                .onMessage(TransitionToValidationPhaseMessage.class, this::handle)
                 .build();
     }
 
@@ -332,7 +343,6 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(RequestColumnMessage message) {
-
         Set<String> columnData = this.sortedColumns != null
                 ? new HashSet<>(this.sortedColumns.get(message.getAttributeId())) // Validation phase - return sorted
                 : this.columns.get(message.getAttributeId()); // Loading phase - return unsorted
@@ -374,6 +384,12 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         }
 
         this.getContext().getLog().info("=====================================================");
+        return this;
+    }
+
+    private Behavior<Message> handle(TransitionToValidationPhaseMessage message) {
+        this.getContext().getLog().info("DataProvider-{} received transition to validation phase message", this.dataProviderId);
+        this.transitionToValidationPhase();
         return this;
     }
 
