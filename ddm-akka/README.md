@@ -107,6 +107,13 @@ java -jar target/ddm-akka.jar master -es true
 
 > **Note:** The `-es true` flag is for demo purposes only. Press `Enter` to terminate. A working solution should end itself automatically once complete. Skip this flag (`-es false` or omit it) for production runs.
 
+### Local Undistributed Run (Single Process)
+Run master and workers in a single process (not distributed):
+
+```bash
+java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar master -w 4
+```
+
 ### Local Distributed Run (Single Machine)
 
 Run master and multiple workers on the same machine using different terminal windows:
@@ -118,17 +125,22 @@ java -Xms512m -Xmx512m -jar target/ddm-akka.jar master -w 0
 
 **Terminal 2 - Worker 1 (default port 7879):**
 ```bash
-java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 1
+java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 4
 ```
 
 **Terminal 3 - Worker 2 (custom port):**
 ```bash
-java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 1 -p 7880
+java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 2 -p 7880
 ```
 
 **Terminal 4 - Worker 3 (another custom port):**
 ```bash
 java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 1 -p 7881
+```
+
+**Terminal 5 - Worker 4 (another custom port):**
+```bash
+java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 1 -p 7882
 ```
 
 > **Important:** Each worker on the same machine must use a different port (`-p` flag).
