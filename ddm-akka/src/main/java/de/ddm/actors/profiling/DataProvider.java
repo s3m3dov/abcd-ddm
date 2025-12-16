@@ -298,10 +298,18 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
 
     private Behavior<Message> handle(AcceptDataMessage message) {
         this.getContext().getLog().info(
-                "DataProvider-{} accepting {} columns from DataProvider-{}",
+                "DataProvider-{} accepting {} columns from DataProvider-{} (total {} values)",
                 this.dataProviderId,
                 message.getColumns().size(),
-                message.getFromDataProviderId());
+                message.getFromDataProviderId(),
+                message.getColumns().values().stream().mapToInt(Set::size).sum());
+
+        // Log details of each column being accepted
+        for (Map.Entry<Integer, Set<String>> entry : message.getColumns().entrySet()) {
+            this.getContext().getLog().debug(
+                    "  Attribute {}: {} values",
+                    entry.getKey(), entry.getValue().size());
+        }
 
         // Step 1: Add the received columns to our local storage
         this.acceptIncomingColumns(message.getColumns());
@@ -311,6 +319,10 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
 
         // Step 3: Track progress and report when all moves are complete
         this.receivedBatchCount++;
+        this.getContext().getLog().info(
+                "DataProvider-{} received {}/{} expected moves",
+                this.dataProviderId, this.receivedBatchCount, message.getTotalExpectedMoves());
+
         if (this.receivedBatchCount == message.getTotalExpectedMoves()) {
             this.receivedBatchCount = 0;
             this.reportStatus();
