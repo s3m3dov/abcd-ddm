@@ -9,6 +9,7 @@ import akka.actor.typed.javadsl.Receive;
 import de.ddm.actors.Guardian;
 import de.ddm.serialization.AkkaSerializable;
 import de.ddm.singletons.OutputConfigurationSingleton;
+import de.ddm.utils.LoggingInterceptor;
 import de.ddm.structures.InclusionDependency;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -49,7 +50,7 @@ public class ResultCollector extends AbstractBehavior<ResultCollector.Message> {
 	public static final String DEFAULT_NAME = "resultCollector";
 
 	public static Behavior<Message> create() {
-		return Behaviors.setup(ResultCollector::new);
+		return LoggingInterceptor.wrap(Behaviors.setup(ResultCollector::new));
 	}
 
 	private ResultCollector(ActorContext<Message> context) throws IOException {
@@ -84,8 +85,8 @@ public class ResultCollector extends AbstractBehavior<ResultCollector.Message> {
 	}
 
 	private Behavior<Message> handle(ResultMessage message) throws IOException {
-//		this.getContext().getLog().info("Received {} INDs!", message.getInclusionDependencies().size());
-
+		this.getContext().getLog().info("Received {} INDs!", message.getInclusionDependencies().size());
+		// Write inclusion dependencies to file
 		for (InclusionDependency ind : message.getInclusionDependencies()) {
 			this.writer.write(ind.toString());
 			this.writer.newLine();
@@ -95,8 +96,6 @@ public class ResultCollector extends AbstractBehavior<ResultCollector.Message> {
 	}
 
 	private Behavior<Message> handle(FinalizeMessage message) throws IOException {
-		this.getContext().getLog().info("Received FinalizeMessage!");
-
 		this.writer.flush();
 		this.getContext().getSystem().unsafeUpcast().tell(new Guardian.ShutdownMessage());
 		return this;
