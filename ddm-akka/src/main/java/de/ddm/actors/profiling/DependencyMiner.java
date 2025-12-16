@@ -637,9 +637,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	// * REBALANCING * //
 	/**
-	 * Trigger rebalancing by redistributing attributes evenly across all
-	 * DataProviders,
-	 * including those awaiting rebalancing.
+	 * Trigger rebalancing by redistributing attributes to new DataProviders.
+	 * Delegates to appropriate strategy based on whether overloaded DataProviders
+	 * exist.
 	 */
 	private void triggerRebalancing() {
 		int numDataProviders = this.dataProviders.size();
@@ -658,46 +658,162 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		// Log BEFORE state
 		logAttributeDistribution("BEFORE rebalancing", currentCounts);
 
-		// For each awaiting DataProvider, steal attributes to reach target
-		for (int awaitingDataProvider : this.awaitingDataProviderIds) {
-			int needed = targetAttributesPerDP;
-			Int2IntMap attribute2sourceDP = new Int2IntOpenHashMap(); // Track original source before update
+		// Check if any DataProviders are overloaded
+		boolean hasOverloaded = this.dataProvidersOverloaded.stream().anyMatch(b -> b);
 
-			// Steal from DataProviders that have more than target
-			for (int sourceDataProvider = 0; sourceDataProvider < numDataProviders; sourceDataProvider++) {
-				if (sourceDataProvider == awaitingDataProvider)
-					continue;
-
-				while (currentCounts[sourceDataProvider] > targetAttributesPerDP && needed > 0) {
-					// Find a random attribute owned by sourceDP
-					int attribute = findRandomAttribute(sourceDataProvider);
-
-					// Track the source BEFORE updating mapping
-					attribute2sourceDP.put(attribute, sourceDataProvider);
-
-					// Update mapping immediately
-					this.attribute2dataProvider[attribute] = awaitingDataProvider;
-					currentCounts[sourceDataProvider]--;
-					currentCounts[awaitingDataProvider]++;
-					needed--;
-				}
-			}
-
-			// Send MoveDataMessages to source DataProviders
-			sendMoveDataMessages(awaitingDataProvider, attribute2sourceDP);
-
-			// Track source DataProviders involved in rebalancing
-			for (int sourceDP : attribute2sourceDP.values()) {
-				this.rebalancingDataProviderIds.add(sourceDP);
-			}
+		if (hasOverloaded) {
+			// Use overload-priority strategy
+			this.getContext().getLog().info("Using overload-priority rebalancing strategy");
+			rebalanceWithOverloadPriority(numDataProviders, targetAttributesPerDP, currentCounts);
+		} else {
+			// Use batch-wise (even distribution) strategy
+			this.getContext().getLog().info("Using batch-wise rebalancing strategy");
+			rebalanceBatchWise(numDataProviders, targetAttributesPerDP, currentCounts);
 		}
 
 		// Clear awaiting list
 		this.awaitingDataProviderIds.clear();
+
 		// Log AFTER state
 		logAttributeDistribution("AFTER rebalancing", currentCounts);
 
 		this.getContext().getLog().info("Rebalancing in progress, batches delayed");
+	}
+
+	/**
+	 * Batch-wise rebalancing: Evenly distribute attributes across all
+	 * DataProviders.
+	 * This is the original strategy - steal from any DataProvider with excess
+	 * columns.
+	 */
+	private void rebalanceBatchWise(int numDataProviders, int targetAttributesPerDP, int[] currentCounts) {
+		for (int awaitingDataProvider : this.awaitingDataProviderIds) {
+			Int2IntMap attribute2sourceDP = new Int2IntOpenHashMap();
+
+			// Steal from all DataProviders with excess columns
+			stealColumnsFromSources(
+					awaitingDataProvider,
+					numDataProviders,
+					targetAttributesPerDP,
+					currentCounts,
+					attribute2sourceDP,
+					sourceDP -> true // Accept any DataProvider as source
+			);
+
+			// Complete the rebalancing for this awaiting DataProvider
+			completeRebalancing(awaitingDataProvider, attribute2sourceDP);
+		}
+	}
+
+	/**
+	 * Overload-priority rebalancing: Prioritize stealing from overloaded
+	 * DataProviders.
+	 * Uses a two-phase approach:
+	 * Phase 1: Steal from overloaded DataProviders first
+	 * Phase 2: Steal from non-overloaded DataProviders if needed
+	 */
+	private void rebalanceWithOverloadPriority(int numDataProviders, int targetAttributesPerDP, int[] currentCounts) {
+		for (int awaitingDataProvider : this.awaitingDataProviderIds) {
+			Int2IntMap attribute2sourceDP = new Int2IntOpenHashMap();
+
+			// PHASE 1: Steal from overloaded DataProviders
+			int stolenFromOverloaded = stealColumnsFromSources(
+					awaitingDataProvider,
+					numDataProviders,
+					targetAttributesPerDP,
+					currentCounts,
+					attribute2sourceDP,
+					sourceDP -> this.dataProvidersOverloaded.getBoolean(sourceDP));
+
+			if (stolenFromOverloaded > 0) {
+				this.getContext().getLog().info(
+						"Phase 1: Stole {} columns from overloaded DataProviders for DataProvider-{}",
+						stolenFromOverloaded, awaitingDataProvider);
+			}
+
+			// PHASE 2: Steal from non-overloaded DataProviders if still needed
+			int stolenFromNonOverloaded = stealColumnsFromSources(
+					awaitingDataProvider,
+					numDataProviders,
+					targetAttributesPerDP,
+					currentCounts,
+					attribute2sourceDP,
+					sourceDP -> !this.dataProvidersOverloaded.getBoolean(sourceDP));
+
+			if (stolenFromNonOverloaded > 0) {
+				this.getContext().getLog().info(
+						"Phase 2: Stole {} columns from non-overloaded DataProviders for DataProvider-{}",
+						stolenFromNonOverloaded, awaitingDataProvider);
+			}
+
+			// Complete the rebalancing for this awaiting DataProvider
+			completeRebalancing(awaitingDataProvider, attribute2sourceDP);
+		}
+	}
+
+	/**
+	 * Helper method to steal columns from source DataProviders.
+	 * 
+	 * @param awaitingDataProvider  The DataProvider receiving columns
+	 * @param numDataProviders      Total number of DataProviders
+	 * @param targetAttributesPerDP Target number of attributes per DataProvider
+	 * @param currentCounts         Current attribute counts for each DataProvider
+	 * @param attribute2sourceDP    Map tracking which attributes came from which
+	 *                              source
+	 * @param sourceFilter          Predicate to filter which DataProviders to steal
+	 *                              from
+	 * @return Number of columns stolen
+	 */
+	private int stealColumnsFromSources(
+			int awaitingDataProvider,
+			int numDataProviders,
+			int targetAttributesPerDP,
+			int[] currentCounts,
+			Int2IntMap attribute2sourceDP,
+			java.util.function.IntPredicate sourceFilter) {
+
+		int needed = targetAttributesPerDP - currentCounts[awaitingDataProvider];
+		int stolen = 0;
+
+		for (int sourceDataProvider = 0; sourceDataProvider < numDataProviders; sourceDataProvider++) {
+			if (sourceDataProvider == awaitingDataProvider)
+				continue;
+
+			// Apply filter to determine if we should steal from this source
+			if (!sourceFilter.test(sourceDataProvider))
+				continue;
+
+			while (currentCounts[sourceDataProvider] > targetAttributesPerDP && needed > 0) {
+				// Find a random attribute owned by sourceDP
+				int attribute = findRandomAttribute(sourceDataProvider);
+
+				// Track the source BEFORE updating mapping
+				attribute2sourceDP.put(attribute, sourceDataProvider);
+
+				// Update mapping immediately
+				this.attribute2dataProvider[attribute] = awaitingDataProvider;
+				currentCounts[sourceDataProvider]--;
+				currentCounts[awaitingDataProvider]++;
+				needed--;
+				stolen++;
+			}
+		}
+
+		return stolen;
+	}
+
+	/**
+	 * Complete the rebalancing process for an awaiting DataProvider.
+	 * Sends move messages and tracks rebalancing state.
+	 */
+	private void completeRebalancing(int awaitingDataProvider, Int2IntMap attribute2sourceDP) {
+		// Send MoveDataMessages to source DataProviders
+		sendMoveDataMessages(awaitingDataProvider, attribute2sourceDP);
+
+		// Track source DataProviders involved in rebalancing
+		for (int sourceDP : attribute2sourceDP.values()) {
+			this.rebalancingDataProviderIds.add(sourceDP);
+		}
 	}
 
 	/**
