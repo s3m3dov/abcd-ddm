@@ -93,6 +93,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int[] lhss;
 		int[] rhss;
 		int workerId;
+		boolean usedPruning;
 	}
 
 	////////////////////////
@@ -198,6 +199,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private int completedTasks;
 	private int prunedTasks; // Tasks skipped due to transitivity pruning
 	private int totalINDsFound;
+
+	private long tasksSkippedByStatistics = 0;
+	private long tasksRequiringFullData = 0;
 
 	// Transitivity pruning: Graph-based IND storage for efficient transitivity
 	// checks
@@ -490,8 +494,15 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	private Behavior<Message> handle(ResultMessage message) {
 		this.completedTasks++;
-		this.getContext().getLog().info("ResultMessage! {} INDs from DependencyWorker-{} ({} of {} tasks completed)",
-				message.getLhss().length, message.getWorkerId(), this.completedTasks, this.totalTasks);
+		if (message.isUsedPruning()) {
+			this.tasksSkippedByStatistics++;
+		} else {
+			this.tasksRequiringFullData++;
+		}
+		this.getContext().getLog().info(
+				"ResultMessage! {} INDs from DependencyWorker-{} ({} of {} tasks completed) - Pruned: {}",
+				message.getLhss().length, message.getWorkerId(), this.completedTasks, this.totalTasks,
+				message.isUsedPruning());
 
 		// Store discovered INDs in graph for transitivity pruning
 		for (int i = 0; i < message.getLhss().length; i++) {
@@ -1006,6 +1017,18 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 					long discoveryTime = System.currentTimeMillis() - this.startTime;
 					// Log mining completion
 					this.getContext().getLog().info("Finished mining within {} ms!", discoveryTime);
+
+					// Log pruning statistics
+					long totalResolved = this.tasksSkippedByStatistics + this.tasksRequiringFullData;
+					if (totalResolved > 0) {
+						double percentage = (double) this.tasksSkippedByStatistics / totalResolved * 100.0;
+						this.getContext().getLog().info(
+								"Statistical Pruning: {} tasks resolved by stats ({}%), {} tasks required full data",
+								this.tasksSkippedByStatistics,
+								String.format("%.2f", percentage),
+								this.tasksRequiringFullData);
+					}
+
 					// Log transitivity pruning statistics
 					if (this.totalTasks > 0) {
 						double pruningPercentage = (this.prunedTasks * 100.0) / this.totalTasks;
