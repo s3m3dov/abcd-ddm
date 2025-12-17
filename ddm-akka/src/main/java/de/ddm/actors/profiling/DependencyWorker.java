@@ -192,24 +192,36 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	/////////////////
 
 	private void executeValidation() {
-		// Check if LHS ⊆ RHS (all values in LHS exist in RHS)
-		boolean isIND = this.rhsData.containsAll(this.lhsData);
+		// Check both directions since we have both datasets loaded
+		boolean lhsSubsetRhs = this.rhsData.containsAll(this.lhsData); // lhs ⊆ rhs
+		boolean rhsSubsetLhs = this.lhsData.containsAll(this.rhsData); // rhs ⊆ lhs
 
-		// Debug: Show sample data
-		String lhsSample = Arrays.toString(this.lhsData.stream().limit(5).toArray(String[]::new));
-		String rhsSample = Arrays.toString(this.rhsData.stream().limit(5).toArray(String[]::new));
+		// Build result arrays for discovered INDs
+		List<Integer> lhsList = new ArrayList<>();
+		List<Integer> rhsList = new ArrayList<>();
 
+		if (lhsSubsetRhs) {
+			lhsList.add(this.currentTask.getLhsAttributeId());
+			rhsList.add(this.currentTask.getRhsAttributeId());
+		}
+
+		if (rhsSubsetLhs) {
+			lhsList.add(this.currentTask.getRhsAttributeId());
+			rhsList.add(this.currentTask.getLhsAttributeId());
+		}
+
+		// Debug logging
 		this.getContext().getLog().debug(
-				"DependencyWorker-{} validation result for {} ⊆ {}: {} (LHS size: {}, RHS size: {}, LHS sample: {}, RHS sample: {})",
+				"DependencyWorker-{} bidirectional validation: {} ⊆ {}? {}, {} ⊆ {}? {} (LHS size: {}, RHS size: {})",
 				this.dependencyWorkerId,
-				this.currentTask.getLhsAttributeId(), this.lhsData.size(),
-				this.currentTask.getRhsAttributeId(), this.rhsData.size(),
-				isIND, lhsSample, rhsSample);
+				this.currentTask.getLhsAttributeId(), this.currentTask.getRhsAttributeId(), lhsSubsetRhs,
+				this.currentTask.getRhsAttributeId(), this.currentTask.getLhsAttributeId(), rhsSubsetLhs,
+				this.lhsData.size(), this.rhsData.size());
 
-		// Send result to DependencyMiner
+		// Send results to DependencyMiner (may contain 0, 1, or 2 INDs)
 		this.dependencyMiner.tell(new DependencyMiner.ResultMessage(
-				isIND ? new int[] { this.currentTask.getLhsAttributeId() } : new int[0],
-				isIND ? new int[] { this.currentTask.getRhsAttributeId() } : new int[0],
+				lhsList.stream().mapToInt(Integer::intValue).toArray(),
+				rhsList.stream().mapToInt(Integer::intValue).toArray(),
 				this.dependencyWorkerId));
 
 		// Clear current task (ready for next assignment)
