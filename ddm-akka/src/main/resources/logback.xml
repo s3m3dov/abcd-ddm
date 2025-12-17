@@ -34,5 +34,5 @@
 
     <!-- Specific loggers to different levels -->
     <logger name="akka" level="INFO"/>
-    <logger name="de.ddm" level="INFO"/>
+    <logger name="de.ddm" level="DEBUG"/>
 </configuration>
