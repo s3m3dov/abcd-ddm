@@ -56,8 +56,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	/**
-	 * Column data received from DataProvider (adapted from
-	 * DataProvider.ResponseColumnMessage)
+	 * Column data received from DataProvider
 	 */
 	@Getter
 	@NoArgsConstructor
