@@ -376,15 +376,9 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(RequestColumnMessage message) {
-        Set<String> columnData = this.sortedColumns != null
-                ? new HashSet<>(this.sortedColumns.get(message.getAttributeId())) // Validation phase - return sorted
-                : this.columns.get(message.getAttributeId()); // Loading phase - return unsorted
-
-        if (columnData == null) {
-            this.getContext().getLog().warn("Column data not found for attribute {}",
-                    message.getAttributeId());
-            columnData = Collections.emptySet();
-        }
+        List<String> columnData = this.sortedColumns != null
+        ? new ArrayList<>(this.sortedColumns.get(message.getAttributeId())) // Validation phase - sorted
+        : new ArrayList<>(this.columns.get(message.getAttributeId()));      // Loading phase - unsorted
 
         // Send ColumnDataMessage via LargeMessageProxy to handle large payloads
         DependencyWorker.ColumnDataMessage response = new DependencyWorker.ColumnDataMessage(
