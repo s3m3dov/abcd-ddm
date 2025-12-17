@@ -143,6 +143,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.dataProvider2workers = new HashMap<>();
 		this.worker2dataProvider = new HashMap<>();
 
+		// Initialize transitivity pruning graph
+		this.indGraph = new HashMap<>();
+
 		context.getSystem().receptionist().tell(Receptionist.register(dependencyMinerService, context.getSelf()));
 	}
 
@@ -191,9 +194,15 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	// Validation phase state
 	private Map<Integer, Queue<int[]>> workerTaskQueues; // Per-worker task queues for locality
-	private int totalTasks;
+	private int totalTasks; // Total tasks generated (never changes after initialization)
 	private int completedTasks;
+	private int prunedTasks; // Tasks skipped due to transitivity pruning
 	private int totalINDsFound;
+
+	// Transitivity pruning: Graph-based IND storage for efficient transitivity
+	// checks
+	// Maps lhs -> set of rhs where lhs ⊆ rhs
+	private Map<Integer, Set<Integer>> indGraph;
 
 	// Rebalancing state
 	private IntSet rebalancingDataProviderIds = new IntOpenHashSet(); // IDs of DataProviders involved in rebalancing
@@ -481,8 +490,17 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	private Behavior<Message> handle(ResultMessage message) {
 		this.completedTasks++;
-		this.getContext().getLog().info("ResultMessage! {} INDs from DependencyWorker-{} ({}/{} tasks completed)",
+		this.getContext().getLog().info("ResultMessage! {} INDs from DependencyWorker-{} ({} of {} tasks completed)",
 				message.getLhss().length, message.getWorkerId(), this.completedTasks, this.totalTasks);
+
+		// Store discovered INDs in graph for transitivity pruning
+		for (int i = 0; i < message.getLhss().length; i++) {
+			int lhs = message.getLhss()[i];
+			int rhs = message.getRhss()[i];
+
+			// Add edge lhs -> rhs to the graph (lhs ⊆ rhs)
+			this.indGraph.computeIfAbsent(lhs, k -> new HashSet<>()).add(rhs);
+		}
 
 		// Create Inclusion Dependency objects from the results
 		List<InclusionDependency> inds = new ArrayList<>(message.getLhss().length);
@@ -947,6 +965,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		this.totalTasks = totalTasksGenerated;
 		this.completedTasks = 0;
+		this.prunedTasks = 0; // Reset pruned task counter
 		this.totalINDsFound = 0;
 
 		this.getContext().getLog().info("Generated {} validation tasks distributed across {} DependencyWorkers",
@@ -983,7 +1002,17 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				if (this.completedTasks > 0 || this.totalTasks == 0) {
 					this.resultCollector.tell(new ResultCollector.FinalizeMessage());
 					long discoveryTime = System.currentTimeMillis() - this.startTime;
+					// Log mining completion
 					this.getContext().getLog().info("Finished mining within {} ms!", discoveryTime);
+					// Log transitivity pruning statistics
+					if (this.totalTasks > 0) {
+						double pruningPercentage = (this.prunedTasks * 100.0) / this.totalTasks;
+						this.getContext().getLog().info(
+								"Transitivity Pruning: {} tasks pruned out of {} ({}%)",
+								this.prunedTasks, this.totalTasks,
+								String.format("%.2f", pruningPercentage));
+					}
+					// Log total INDs found
 					this.getContext().getLog().info("Total Inclusion Dependencies found: {}", this.totalINDsFound);
 				} else {
 					this.getContext().getLog().debug(
@@ -997,6 +1026,32 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int[] task = workerQueue.poll();
 		int lhsAttr = task[0];
 		int rhsAttr = task[1];
+
+		// Check if this task can be pruned via transitivity
+		if (canPruneByTransitivity(lhsAttr, rhsAttr)) {
+			this.prunedTasks++;
+			this.completedTasks++; // Count as completed to maintain progress tracking
+
+			// Add to graph for future transitivity checks
+			this.indGraph.computeIfAbsent(lhsAttr, k -> new HashSet<>()).add(rhsAttr);
+
+			// Create and report the IND (we know it's valid through transitivity)
+			String[] dependentAttributes = { this.attribute2name[lhsAttr] };
+			String[] referencedAttributes = { this.attribute2name[rhsAttr] };
+			InclusionDependency ind = new InclusionDependency(
+					this.attribute2file[lhsAttr], dependentAttributes,
+					this.attribute2file[rhsAttr], referencedAttributes);
+
+			this.totalINDsFound++;
+			this.resultCollector.tell(new ResultCollector.ResultMessage(Collections.singletonList(ind)));
+
+			this.getContext().getLog().debug("Pruned task ({} ⊆ {}?) via transitivity - IND reported",
+					lhsAttr, rhsAttr);
+
+			// Recursively assign next task
+			this.assignNextValidationTask(dependencyWorkerId);
+			return;
+		}
 
 		// Verify locality (LHS should be local to this worker's DataProvider)
 		int lhsDataProviderId = this.attribute2dataProvider[lhsAttr];
@@ -1019,6 +1074,31 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		this.getContext().getLog().debug("Assigned task ({} ⊆ {}?) to DependencyWorker-{} (local LHS)", lhsAttr,
 				rhsAttr, dependencyWorkerId);
+	}
+
+	/**
+	 * Check if a task (lhs ⊆ rhs) can be pruned via transitivity.
+	 * Returns true if there exists an intermediate attribute mid where:
+	 * - lhs ⊆ mid (already discovered)
+	 * - mid ⊆ rhs (already discovered)
+	 * This implies lhs ⊆ rhs by transitivity.
+	 */
+	private boolean canPruneByTransitivity(int lhsAttr, int rhsAttr) {
+		Set<Integer> lhsSuccessors = this.indGraph.get(lhsAttr);
+		if (lhsSuccessors == null || lhsSuccessors.isEmpty()) {
+			return false; // No known successors of lhs
+		}
+
+		// Check if any successor of lhs is also a predecessor of rhs
+		for (int mid : lhsSuccessors) {
+			Set<Integer> midSuccessors = this.indGraph.get(mid);
+			if (midSuccessors != null && midSuccessors.contains(rhsAttr)) {
+				// Found transitivity: lhs ⊆ mid ⊆ rhs
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	// * DEBUG OUTPUT * //
