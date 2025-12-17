@@ -15,6 +15,7 @@ import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 
+import de.ddm.structures.ColumnStatistics;
 import java.util.*;
 
 /**
@@ -133,6 +134,18 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         private static final long serialVersionUID = -9876543210987654L;
     }
 
+    /**
+     * Message to request column statistics for a specific attribute
+     */
+    @Getter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class RequestColumnStatisticsMessage implements Message {
+        private static final long serialVersionUID = 556677889900112233L;
+        int attributeId;
+        ActorRef<DependencyWorker.Message> replyTo;
+    }
+
     ////////////////////////
     // Actor Construction //
     ////////////////////////
@@ -202,6 +215,9 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     private ActorRef<DependencyMiner.Message> dependencyMiner;
     private int dataProviderId;
 
+    // Statistics for pruning
+    private Map<Integer, ColumnStatistics> columnStatistics = new HashMap<>();
+
     ////////////////////
     // Actor Behavior //
     ////////////////////
@@ -218,6 +234,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 .onMessage(RequestColumnMessage.class, this::handle)
                 .onMessage(DataInfoDebugMessage.class, this::handle)
                 .onMessage(TransitionToValidationPhaseMessage.class, this::handle)
+                .onMessage(RequestColumnStatisticsMessage.class, this::handle)
                 .build();
     }
 
@@ -326,7 +343,8 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         // Add the received columns to our local storage
         this.acceptIncomingColumns(message.getColumns());
 
-        // Inherit memory metrics from source DataProvider to avoid expensive measurement
+        // Inherit memory metrics from source DataProvider to avoid expensive
+        // measurement
         if (message.getAvgValueSizeInBytes() > 0) {
             // If we haven't measured yet, inherit the source's metric
             if (this.usedMemoryMeasured == 0) {
@@ -338,7 +356,8 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
             // Update predicted memory based on new value count
             this.usedMemoryPredicted = (long) Math.ceil(this.valueCount * this.avgValueSizeInBytes);
         } else {
-            // Fallback: measure if source didn't provide metrics (shouldn't happen normally)
+            // Fallback: measure if source didn't provide metrics (shouldn't happen
+            // normally)
             this.updateMemoryUsage();
         }
 
@@ -406,6 +425,17 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         this.getContext().getLog().info("DataProvider-{} received transition to validation phase message",
                 this.dataProviderId);
         this.transitionToValidationPhase();
+        return this;
+    }
+
+    private Behavior<Message> handle(RequestColumnStatisticsMessage message) {
+        ColumnStatistics stats = this.columnStatistics.get(message.getAttributeId());
+        if (stats == null) {
+            this.getContext().getLog().warn("Statistics requested for unknown attribute {}", message.getAttributeId());
+            return this;
+        }
+
+        message.getReplyTo().tell(new DependencyWorker.ColumnStatisticsMessage(stats));
         return this;
     }
 
@@ -499,6 +529,38 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     private void sortColumns() {
         this.sortedColumns = new Int2ObjectArrayMap<>(this.columns.size());
         IntList attributes = new IntArrayList(this.columns.keySet());
+
+        // Compute statistics before removing columns
+        for (int attribute : attributes) {
+            Set<String> column = this.columns.get(attribute);
+
+            int cardinality = column.size();
+            boolean hasNull = column.contains(null) || column.contains("");
+
+            String minValue = null;
+            String maxValue = null;
+
+            try {
+                // Filter nulls for min/max computation
+                List<String> validValues = new ArrayList<>();
+                for (String s : column) {
+                    if (s != null && !s.isEmpty()) {
+                        validValues.add(s);
+                    }
+                }
+
+                if (!validValues.isEmpty()) {
+                    minValue = Collections.min(validValues);
+                    maxValue = Collections.max(validValues);
+                }
+            } catch (Exception e) {
+                // Gracefully handle if comparison fails
+            }
+
+            this.columnStatistics.put(attribute, new ColumnStatistics(
+                    attribute, cardinality, hasNull, minValue, maxValue));
+        }
+
         for (int attribute : attributes) {
             Set<String> column = this.columns.remove(attribute);
             List<String> sortedColumn = new ArrayList<>(column);
@@ -521,8 +583,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         this.getContext().getLog().info("DataProvider-{} Status: overloaded = {} ({} of {})", this.dataProviderId,
                 overloaded,
                 this.usedMemoryPredicted / 1024 / 1024,
-                this.availableMemory / 1024 / 1024
-        );
+                this.availableMemory / 1024 / 1024);
     }
 
     /**
