@@ -112,19 +112,6 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     /**
-     * Debug message to provide information about the data this DataProvider manages
-     */
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class DataInfoDebugMessage implements Message {
-        private static final long serialVersionUID = -1234567890123456L;
-        int dataProviderId;
-        int[] attributes;
-        String[] attributeNames;
-    }
-
-    /**
      * Message to trigger transition from loading phase to validation phase
      * This will sort columns and free memory from loading phase structures
      */
@@ -232,7 +219,6 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 .onMessage(MoveDataMessage.class, this::handle)
                 .onMessage(AcceptDataMessage.class, this::handle)
                 .onMessage(RequestColumnMessage.class, this::handle)
-                .onMessage(DataInfoDebugMessage.class, this::handle)
                 .onMessage(TransitionToValidationPhaseMessage.class, this::handle)
                 .onMessage(RequestColumnStatisticsMessage.class, this::handle)
                 .build();
@@ -377,8 +363,8 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
 
     private Behavior<Message> handle(RequestColumnMessage message) {
         List<String> columnData = this.sortedColumns != null
-        ? new ArrayList<>(this.sortedColumns.get(message.getAttributeId())) // Validation phase - sorted
-        : new ArrayList<>(this.columns.get(message.getAttributeId()));      // Loading phase - unsorted
+                ? new ArrayList<>(this.sortedColumns.get(message.getAttributeId())) // Validation phase - sorted
+                : new ArrayList<>(this.columns.get(message.getAttributeId())); // Loading phase - unsorted
 
         // Send ColumnDataMessage via LargeMessageProxy to handle large payloads
         DependencyWorker.ColumnDataMessage response = new DependencyWorker.ColumnDataMessage(
@@ -389,35 +375,9 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         return this;
     }
 
-    private Behavior<Message> handle(DataInfoDebugMessage message) {
-        this.getContext().getLog().info("========== DEBUG INFO FOR DATAPROVIDER-{} ==========",
-                message.getDataProviderId());
-        this.getContext().getLog().info("Assigned Attributes: {}", Arrays.toString(message.getAttributes()));
-        this.getContext().getLog().info("Attribute Names: {}", Arrays.toString(message.getAttributeNames()));
-
-        // Log current data state
-        this.getContext().getLog().info("Total managed columns: {}", this.columns != null ? this.columns.size() : 0);
-        this.getContext().getLog().info("Total unique values: {}", this.valueCount);
-        this.getContext().getLog().info("Memory usage: {} MB / {} MB",
-                this.usedMemoryPredicted / 1024 / 1024,
-                this.availableMemory / 1024 / 1024);
-
-        // Log detailed column information
-        if (this.columns != null) {
-            for (Int2ObjectMap.Entry<Set<String>> entry : this.columns.int2ObjectEntrySet()) {
-                this.getContext().getLog().info("  Attribute {}: {} unique values",
-                        entry.getIntKey(), entry.getValue().size());
-            }
-        }
-
-        this.getContext().getLog().info("=====================================================");
-        return this;
-    }
-
     private Behavior<Message> handle(TransitionToValidationPhaseMessage message) {
-
-        this.getContext().getLog().info("DataProvider-{} received transition to validation phase message",
-                this.dataProviderId);
+        this.getContext().getLog().info("DataProvider-{} received transition to validation phase message", this.dataProviderId);
+        this.logDataProviderInfo();
         this.transitionToValidationPhase();
         return this;
     }
@@ -562,6 +522,39 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
             this.sortedColumns.put(attribute, sortedColumn);
         }
         this.columns = null; // Free memory from loading phase
+    }
+
+    /**
+     * Log comprehensive information about this DataProvider's state
+     */
+    private void logDataProviderInfo() {
+        var log = this.getContext().getLog();
+        String prefix = "DataProvider-" + this.dataProviderId;
+
+        int columnCount = this.columns == null ? 0 : this.columns.size();
+        long usedMb = this.usedMemoryPredicted / 1024 / 1024;
+        long availMb = this.availableMemory / 1024 / 1024;
+        double memPercent = this.availableMemory == 0
+                ? 0
+                : (this.usedMemoryPredicted * 100.0) / this.availableMemory;
+
+        log.info(
+                "{} | Memory Usage: {}% ({}MB of {}MB) | Columns: {}, Unique values: {} | Avg value size: {} bytes",
+                prefix,
+                Math.round(memPercent * 10) / 10.0,
+                usedMb,
+                availMb,
+                columnCount,
+                this.valueCount,
+                Math.round(this.avgValueSizeInBytes * 100) / 100.0
+        );
+
+        if (log.isDebugEnabled() && this.columns != null && !this.columns.isEmpty()) {
+            String attrs = this.columns.int2ObjectEntrySet().stream()
+                    .map(e -> e.getIntKey() + "=" + e.getValue().size())
+                    .collect(java.util.stream.Collectors.joining(", "));
+            log.debug("{} | Attribute unique values: [{}]", prefix, attrs);
+        }
     }
 
     /**
