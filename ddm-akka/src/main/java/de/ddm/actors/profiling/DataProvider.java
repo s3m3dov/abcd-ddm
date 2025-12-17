@@ -254,7 +254,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         for (int attribute : message.getAttributes()) {
             this.columns.put(attribute, new HashSet<>());
         }
-        this.getContext().getLog().info("DataProvider-{} initialized with {} attributes",
+        this.getContext().getLog().info("DataProvider-{} has been assigned {} attributes",
                 this.dataProviderId, message.getAttributes().length);
         this.reportStatus();
         return this;
@@ -567,7 +567,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         // Answer with status
         this.dependencyMiner.tell(new DependencyMiner.StatusMessage(this.dataProviderId, false, overloaded));
 
-        this.getContext().getLog().info("DataProvider-{} Status: overloaded = {} ({} of {})", this.dataProviderId,
+        this.getContext().getLog().info("DataProvider-{} | Status: overloaded = {} ({} of {})", this.dataProviderId,
                 overloaded,
                 this.usedMemoryPredicted / 1024 / 1024,
                 this.availableMemory / 1024 / 1024);

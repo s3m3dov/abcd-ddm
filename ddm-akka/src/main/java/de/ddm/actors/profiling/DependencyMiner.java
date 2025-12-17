@@ -463,8 +463,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	}
 
 	private Behavior<Message> handle(DependencyWorkerRegistrationMessage message) {
-		this.getContext().getLog().info("WorkerRegistrationMessage received");
-
 		ActorRef<DependencyWorker.Message> dependencyWorker = message.getDependencyWorker();
 		ActorRef<LargeMessageProxy.Message> dependencyWorkerLMP = message.getDependencyWorkerLMP();
 		ActorRef<DataProvider.Message> localDataProvider = message.getLocalDataProvider();
@@ -633,7 +631,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		for (int attribute = 0; attribute < numAttributes; attribute++)
 			this.attribute2dataProvider[attribute] = attribute % numDataProviders;
 
-		this.getContext().getLog().info("Mapped {} attributes to {} DataProviders",
+		this.getContext().getLog().debug("Mapped {} attributes to {} DataProviders",
 				numAttributes, numDataProviders);
 	}
 
@@ -670,34 +668,28 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				numAttributes, numDataProviders, targetAttributesPerDP);
 
 		// Calculate current distribution
-		int[] currentCounts = new int[numDataProviders];
+		int[] attributeCounts = new int[numDataProviders];
 		for (int attribute = 0; attribute < numAttributes; attribute++) {
-			currentCounts[this.attribute2dataProvider[attribute]]++;
+			attributeCounts[this.attribute2dataProvider[attribute]]++;
 		}
-
-		// Log BEFORE state
-		logAttributeDistribution("BEFORE rebalancing", currentCounts);
+		logAttributeDistribution("BEFORE Rebalancing", attributeCounts);
 
 		// Check if any DataProviders are overloaded
 		boolean hasOverloaded = this.dataProvidersOverloaded.stream().anyMatch(b -> b);
 
 		if (hasOverloaded) {
 			// Use overload-priority strategy
-			this.getContext().getLog().info("Using overload-priority rebalancing strategy");
-			rebalanceWithOverloadPriority(numDataProviders, targetAttributesPerDP, currentCounts);
+			this.getContext().getLog().info("Rebalancing strategy: overload-priority");
+			rebalanceWithOverloadPriority(numDataProviders, targetAttributesPerDP, attributeCounts);
 		} else {
 			// Use batch-wise (even distribution) strategy
-			this.getContext().getLog().info("Using batch-wise rebalancing strategy");
-			rebalanceBatchWise(numDataProviders, targetAttributesPerDP, currentCounts);
+			this.getContext().getLog().info("Rebalancing strategy: batch-wise");
+			rebalanceBatchWise(numDataProviders, targetAttributesPerDP, attributeCounts);
 		}
 
-		// Clear awaiting list
 		this.awaitingDataProviderIds.clear();
-
-		// Log AFTER state
-		logAttributeDistribution("AFTER rebalancing", currentCounts);
-
-		this.getContext().getLog().info("Rebalancing in progress, batches delayed");
+		logAttributeDistribution("AFTER Rebalancing", attributeCounts);
+		this.getContext().getLog().info("Rebalancing in progress — batch processing paused");
 	}
 
 	/**
@@ -887,27 +879,35 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	 * DataProvider.
 	 */
 	private void logAttributeDistribution(String label, int[] attributeCounts) {
-		StringBuilder summary = new StringBuilder(label + " - Counts: ");
-		for (int dpId = 0; dpId < attributeCounts.length; dpId++) {
-			summary.append("DP-").append(dpId).append(": ").append(attributeCounts[dpId]);
-			if (dpId < attributeCounts.length - 1) {
-				summary.append(", ");
-			}
-		}
-		this.getContext().getLog().info(summary.toString());
+        var log = this.getContext().getLog();
 
-		// Log detailed attribute IDs for each DataProvider
-		for (int dpId = 0; dpId < this.dataProviders.size(); dpId++) {
-			IntList attributeIds = new IntArrayList();
-			for (int attribute = 0; attribute < this.attribute2dataProvider.length; attribute++) {
-				if (this.attribute2dataProvider[attribute] == dpId) {
-					attributeIds.add(attribute);
-				}
-			}
-			this.getContext().getLog().info("{} - DataProvider-{}: {} attributes -> {}",
-					label, dpId, attributeIds.size(), attributeIds);
-		}
-	}
+        StringBuilder sb = new StringBuilder(label).append(" | AttributeCounts: ");
+        for (int i = 0; i < attributeCounts.length; i++) {
+            if (i > 0) sb.append(", ");
+            sb.append("DP-").append(i).append(": ").append(attributeCounts[i]);
+        }
+        log.info(sb.toString());
+
+        if (log.isDebugEnabled()) {
+            for (int dpId = 0; dpId < this.dataProviders.size(); dpId++) {
+                IntList attributeIds = new IntArrayList();
+                for (int attr = 0; attr < this.attribute2dataProvider.length; attr++) {
+                    if (this.attribute2dataProvider[attr] == dpId) {
+                        attributeIds.add(attr);
+                    }
+                }
+
+                log.debug(
+                        "{} | DataProvider-{} | Attributes: {} -> {}",
+                        label,
+                        dpId,
+                        attributeIds.size(),
+                        attributeIds
+                );
+            }
+        }
+    }
+
 
     /**
 	 * Log validation phase final results including tasks executed, pruning
