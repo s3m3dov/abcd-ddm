@@ -956,7 +956,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			int targetWorkerId = colocatedWorkers.get(lhsAttr % colocatedWorkers.size());
 
 			for (int rhsAttr = 0; rhsAttr < numAttributes; rhsAttr++) {
-				if (lhsAttr != rhsAttr) {
+				// Only generate task if lhsAttr < rhsAttr to avoid duplicates
+				// DependencyWorker will check both directions (lhs ⊆ rhs AND rhs ⊆ lhs)
+				if (lhsAttr < rhsAttr) {
 					this.workerTaskQueues.get(targetWorkerId).add(new int[] { lhsAttr, rhsAttr });
 					totalTasksGenerated++;
 				}
@@ -1027,26 +1029,37 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int lhsAttr = task[0];
 		int rhsAttr = task[1];
 
-		// Check if this task can be pruned via transitivity
+		// Check if this task can be pruned via bidirectional transitivity
 		if (canPruneByTransitivity(lhsAttr, rhsAttr)) {
 			this.prunedTasks++;
 			this.completedTasks++; // Count as completed to maintain progress tracking
 
-			// Add to graph for future transitivity checks
+			// Since we only prune when BOTH directions can be inferred,
+			// we need to add both directions to the graph and report both INDs
+
+			// Add both directions to graph for future transitivity checks
 			this.indGraph.computeIfAbsent(lhsAttr, k -> new HashSet<>()).add(rhsAttr);
+			this.indGraph.computeIfAbsent(rhsAttr, k -> new HashSet<>()).add(lhsAttr);
 
-			// Create and report the IND (we know it's valid through transitivity)
-			String[] dependentAttributes = { this.attribute2name[lhsAttr] };
-			String[] referencedAttributes = { this.attribute2name[rhsAttr] };
-			InclusionDependency ind = new InclusionDependency(
-					this.attribute2file[lhsAttr], dependentAttributes,
-					this.attribute2file[rhsAttr], referencedAttributes);
+			// Create and report both INDs (we know both are valid through transitivity)
+			List<InclusionDependency> inds = new ArrayList<>();
 
-			this.totalINDsFound++;
-			this.resultCollector.tell(new ResultCollector.ResultMessage(Collections.singletonList(ind)));
+			// IND 1: lhs ⊆ rhs
+			inds.add(new InclusionDependency(
+					this.attribute2file[lhsAttr], new String[] { this.attribute2name[lhsAttr] },
+					this.attribute2file[rhsAttr], new String[] { this.attribute2name[rhsAttr] }));
 
-			this.getContext().getLog().debug("Pruned task ({} ⊆ {}?) via transitivity - IND reported",
-					lhsAttr, rhsAttr);
+			// IND 2: rhs ⊆ lhs
+			inds.add(new InclusionDependency(
+					this.attribute2file[rhsAttr], new String[] { this.attribute2name[rhsAttr] },
+					this.attribute2file[lhsAttr], new String[] { this.attribute2name[lhsAttr] }));
+
+			this.totalINDsFound += 2;
+			this.resultCollector.tell(new ResultCollector.ResultMessage(inds));
+
+			this.getContext().getLog().debug(
+					"Pruned task ({} ⊆ {}? AND {} ⊆ {}?) via bidirectional transitivity - both INDs reported",
+					lhsAttr, rhsAttr, rhsAttr, lhsAttr);
 
 			// Recursively assign next task
 			this.assignNextValidationTask(dependencyWorkerId);
@@ -1077,23 +1090,45 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	}
 
 	/**
-	 * Check if a task (lhs ⊆ rhs) can be pruned via transitivity.
-	 * Returns true if there exists an intermediate attribute mid where:
-	 * - lhs ⊆ mid (already discovered)
-	 * - mid ⊆ rhs (already discovered)
-	 * This implies lhs ⊆ rhs by transitivity.
+	 * Check if a task can be pruned via bidirectional transitivity pruning.
+	 * Since DependencyWorker checks both directions (lhs ⊆ rhs AND rhs ⊆ lhs),
+	 * we can only prune the entire task if BOTH directions can be inferred via
+	 * transitivity.
+	 * 
+	 * @param lhsAttr First attribute in the task
+	 * @param rhsAttr Second attribute in the task
+	 * @return true if both lhs ⊆ rhs AND rhs ⊆ lhs can be inferred via transitivity
 	 */
 	private boolean canPruneByTransitivity(int lhsAttr, int rhsAttr) {
-		Set<Integer> lhsSuccessors = this.indGraph.get(lhsAttr);
-		if (lhsSuccessors == null || lhsSuccessors.isEmpty()) {
-			return false; // No known successors of lhs
+		// Check if lhs ⊆ rhs can be pruned
+		boolean canPruneLhsToRhs = canPruneDirection(lhsAttr, rhsAttr);
+
+		// Check if rhs ⊆ lhs can be pruned
+		boolean canPruneRhsToLhs = canPruneDirection(rhsAttr, lhsAttr);
+
+		// Only prune the entire task if BOTH directions can be pruned
+		// This ensures we don't skip validation when one direction is still unknown
+		return canPruneLhsToRhs && canPruneRhsToLhs;
+	}
+
+	/**
+	 * Check if a specific direction (from ⊆ to) can be pruned via transitivity.
+	 * Returns true if there exists an intermediate attribute mid where:
+	 * - from ⊆ mid (already discovered)
+	 * - mid ⊆ to (already discovered)
+	 * This implies from ⊆ to by transitivity.
+	 */
+	private boolean canPruneDirection(int from, int to) {
+		Set<Integer> fromSuccessors = this.indGraph.get(from);
+		if (fromSuccessors == null || fromSuccessors.isEmpty()) {
+			return false; // No known successors of 'from'
 		}
 
-		// Check if any successor of lhs is also a predecessor of rhs
-		for (int mid : lhsSuccessors) {
+		// Check if any successor of 'from' is also a predecessor of 'to'
+		for (int mid : fromSuccessors) {
 			Set<Integer> midSuccessors = this.indGraph.get(mid);
-			if (midSuccessors != null && midSuccessors.contains(rhsAttr)) {
-				// Found transitivity: lhs ⊆ mid ⊆ rhs
+			if (midSuccessors != null && midSuccessors.contains(to)) {
+				// Found transitivity: from ⊆ mid ⊆ to
 				return true;
 			}
 		}
