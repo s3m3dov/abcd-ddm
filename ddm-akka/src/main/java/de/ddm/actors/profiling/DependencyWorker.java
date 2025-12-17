@@ -185,10 +185,20 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		if (this.currentTask == null)
 			return this;
 
-		if (message.getStatistics().getAttributeId() == this.currentTask.getLhsAttributeId()) {
-			this.lhsStatistics = message.getStatistics();
-		} else if (message.getStatistics().getAttributeId() == this.currentTask.getRhsAttributeId()) {
-			this.rhsStatistics = message.getStatistics();
+		ColumnStatistics stats = message.getStatistics();
+
+		if (stats.getAttributeId() == this.currentTask.getLhsAttributeId()) {
+			this.lhsStatistics = stats;
+			this.getContext().getLog().info(
+					"DependencyWorker-{} received LHS statistics for attribute {}: cardinality={}, hasNull={}, min={}, max={}",
+					this.dependencyWorkerId, stats.getAttributeId(), stats.getCardinality(),
+					stats.isHasNull(), stats.getMinValue(), stats.getMaxValue());
+		} else if (stats.getAttributeId() == this.currentTask.getRhsAttributeId()) {
+			this.rhsStatistics = stats;
+			this.getContext().getLog().info(
+					"DependencyWorker-{} received RHS statistics for attribute {}: cardinality={}, hasNull={}, min={}, max={}",
+					this.dependencyWorkerId, stats.getAttributeId(), stats.getCardinality(),
+					stats.isHasNull(), stats.getMinValue(), stats.getMaxValue());
 		}
 
 		if (this.lhsStatistics != null && this.rhsStatistics != null) {
@@ -199,17 +209,30 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	private void checkStatisticsAndDecide() {
+		this.getContext().getLog().info(
+				"DependencyWorker-{} analyzing statistics for task: {} ⊆ {} (bidirectional)",
+				this.dependencyWorkerId,
+				this.currentTask.getLhsAttributeId(),
+				this.currentTask.getRhsAttributeId());
+
+		// Check both directions
 		Boolean lhsSubsetRhs = checkSubset(this.lhsStatistics, this.rhsStatistics);
 		Boolean rhsSubsetLhs = checkSubset(this.rhsStatistics, this.lhsStatistics);
 
-		// If BOTH are determined, report findings and skip data fetch
-		if (lhsSubsetRhs != null && rhsSubsetLhs != null) {
-			this.getContext().getLog().debug(
-					"DependencyWorker-{} Pruning success: {} -> {}, {} -> {}",
-					this.dependencyWorkerId,
-					this.currentTask.getLhsAttributeId(), lhsSubsetRhs,
-					this.currentTask.getRhsAttributeId(), rhsSubsetLhs);
+		// Log the pruning decision for each direction
+		logPruningDecision("LHS ⊆ RHS", this.currentTask.getLhsAttributeId(),
+				this.currentTask.getRhsAttributeId(), lhsSubsetRhs);
+		logPruningDecision("RHS ⊆ LHS", this.currentTask.getRhsAttributeId(),
+				this.currentTask.getLhsAttributeId(), rhsSubsetLhs);
 
+		// If BOTH directions are determined (conclusive), report findings and skip data
+		// fetch
+		if (lhsSubsetRhs != null && rhsSubsetLhs != null) {
+			this.getContext().getLog().info(
+					"DependencyWorker-{} ✓ CONCLUSIVE: Both directions determined by statistics - skipping data fetch",
+					this.dependencyWorkerId);
+
+			// Build result lists for discovered INDs
 			List<Integer> lhsList = new ArrayList<>();
 			List<Integer> rhsList = new ArrayList<>();
 
@@ -223,27 +246,23 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 				rhsList.add(this.currentTask.getLhsAttributeId());
 			}
 
+			// Send results to DependencyMiner (pruned=true)
 			this.dependencyMiner.tell(new DependencyMiner.ResultMessage(
 					lhsList.stream().mapToInt(Integer::intValue).toArray(),
 					rhsList.stream().mapToInt(Integer::intValue).toArray(),
 					this.dependencyWorkerId,
 					true));
 
-			// Complete task
-			this.currentTask = null;
-			this.lhsData = null;
-			this.rhsData = null;
-			this.lhsStatistics = null;
-			this.rhsStatistics = null;
+			// Clear task state
+			clearTaskState();
 
 		} else {
-			// Fallback to full data validation
-			this.getContext().getLog().debug(
-					"DependencyWorker-{} Pruning inconclusive for {} and {}, fetching data",
-					this.dependencyWorkerId,
-					this.currentTask.getLhsAttributeId(),
-					this.currentTask.getRhsAttributeId());
+			// At least one direction is inconclusive - fallback to full data validation
+			this.getContext().getLog().info(
+					"DependencyWorker-{} ✗ INCONCLUSIVE: Statistics insufficient - fetching full column data",
+					this.dependencyWorkerId);
 
+			// Request full column data for validation
 			this.localDataProvider.tell(new DataProvider.RequestColumnMessage(
 					this.currentTask.getLhsAttributeId(), this.getContext().getSelf(), this.largeMessageProxy));
 			this.currentTask.getRhsDataProvider().tell(new DataProvider.RequestColumnMessage(
@@ -251,34 +270,94 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		}
 	}
 
+	/**
+	 * Log the pruning decision for a specific direction
+	 */
+	private void logPruningDecision(String direction, int lhsAttr, int rhsAttr, Boolean result) {
+		if (result == null) {
+			this.getContext().getLog().info(
+					"  {} ({} ⊆ {}): INCONCLUSIVE - cannot determine from statistics alone",
+					direction, lhsAttr, rhsAttr);
+		} else if (result) {
+			this.getContext().getLog().info(
+					"  {} ({} ⊆ {}): TRUE - subset relationship confirmed by statistics",
+					direction, lhsAttr, rhsAttr);
+		} else {
+			this.getContext().getLog().info(
+					"  {} ({} ⊆ {}): FALSE - subset relationship disproven by statistics",
+					direction, lhsAttr, rhsAttr);
+		}
+	}
+
+	/**
+	 * Clear current task state after completion
+	 */
+	private void clearTaskState() {
+		this.currentTask = null;
+		this.lhsData = null;
+		this.rhsData = null;
+		this.lhsStatistics = null;
+		this.rhsStatistics = null;
+	}
+
+	/**
+	 * Check if column A is a subset of column B using statistics-based pruning.
+	 * 
+	 * @param A Statistics for the potential subset column
+	 * @param B Statistics for the potential superset column
+	 * @return true if A ⊆ B is proven, false if disproven, null if inconclusive
+	 */
 	private Boolean checkSubset(ColumnStatistics A, ColumnStatistics B) {
 		// 1. Cardinality Pruning
-		// Effective cardinality of A excludes nulls because "null is subset of every
-		// attr"
+		// Effective cardinality of A excludes nulls because "null is subset of every attr"
 		int effCardinalityA = A.getCardinality() - (A.isHasNull() ? 1 : 0);
 		// Cardinality of B must at least cover the non-null distinct values of A
 		if (effCardinalityA > B.getCardinality()) {
+			this.getContext().getLog().debug(
+					"    Cardinality pruning: {} ⊆ {} = FALSE (effCard({})={} > card({})={})",
+					A.getAttributeId(), B.getAttributeId(),
+					A.getAttributeId(), effCardinalityA,
+					B.getAttributeId(), B.getCardinality());
 			return false;
 		}
 
-		// 2. Min/Max Pruning
+		// 2. Min/Max Range Pruning
 		if (A.getMinValue() != null) {
 			// A has values
 			if (B.getMinValue() == null) {
 				// B is empty/nulls only, but A has values -> False
+				this.getContext().getLog().debug(
+						"    Range pruning: {} ⊆ {} = FALSE (A has values but B is empty/null-only)",
+						A.getAttributeId(), B.getAttributeId());
 				return false;
 			}
+
 			// Both have values, check ranges
-			if (A.getMinValue().compareTo(B.getMinValue()) < 0)
+			if (A.getMinValue().compareTo(B.getMinValue()) < 0) {
+				this.getContext().getLog().debug(
+						"    Range pruning: {} ⊆ {} = FALSE (min({})='{}' < min({})='{}')",
+						A.getAttributeId(), B.getAttributeId(),
+						A.getAttributeId(), A.getMinValue(),
+						B.getAttributeId(), B.getMinValue());
 				return false;
+			}
 
 			if (A.getMaxValue() != null && B.getMaxValue() != null) {
-				if (A.getMaxValue().compareTo(B.getMaxValue()) > 0)
+				if (A.getMaxValue().compareTo(B.getMaxValue()) > 0) {
+					this.getContext().getLog().debug(
+							"    Range pruning: {} ⊆ {} = FALSE (max({})='{}' > max({})='{}')",
+							A.getAttributeId(), B.getAttributeId(),
+							A.getAttributeId(), A.getMaxValue(),
+							B.getAttributeId(), B.getMaxValue());
 					return false;
+				}
 			}
 		}
 
-		// Cannot prune
+		// Cannot prune - statistics are insufficient to determine the relationship
+		this.getContext().getLog().debug(
+				"    No pruning rule applies: {} ⊆ {} = INCONCLUSIVE (need full data comparison)",
+				A.getAttributeId(), B.getAttributeId());
 		return null;
 	}
 
@@ -340,12 +419,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 				this.dependencyWorkerId,
 				false));
 
-		// Clear current task (ready for next assignment)
-		this.currentTask = null;
-		this.lhsData = null;
-		this.rhsData = null;
-		this.lhsStatistics = null;
-		this.rhsStatistics = null;
+		// Clear task state (ready for next assignment)
+		clearTaskState();
 	}
 
 }
