@@ -118,6 +118,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	private ValidateTaskMessage currentTask = null;
 	private Set<String> lhsData = null;
 	private Set<String> rhsData = null;
+	private int cachedLhsAttributeId = -1; // Track cached LHS attribute for reuse
 
 	private ColumnStatistics lhsStatistics = null;
 	private ColumnStatistics rhsStatistics = null;
@@ -167,14 +168,37 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 		// Store current task
 		this.currentTask = message;
-		this.lhsData = null;
+
+		// Check if we can reuse cached LHS data from previous task
+		boolean canReuseLhsData = (this.lhsData != null &&
+				this.cachedLhsAttributeId == message.getLhsAttributeId());
+		boolean canReuseLhsStats = (this.lhsStatistics != null &&
+				this.lhsStatistics.getAttributeId() == message.getLhsAttributeId());
+
+		if (canReuseLhsData || canReuseLhsStats) {
+			this.getContext().getLog().info(
+					"DependencyWorker-{} reusing cached LHS data/stats for attribute {} (data={}, stats={})",
+					this.dependencyWorkerId, message.getLhsAttributeId(), canReuseLhsData, canReuseLhsStats);
+		}
+
+		// Clear RHS data (always changes between tasks)
 		this.rhsData = null;
-		this.lhsStatistics = null;
 		this.rhsStatistics = null;
 
-		// Request statistics first
-		this.localDataProvider.tell(new DataProvider.RequestColumnStatisticsMessage(
-				message.getLhsAttributeId(), this.getContext().getSelf()));
+		// Clear LHS data only if attribute changed
+		if (!canReuseLhsData) {
+			this.lhsData = null;
+			this.cachedLhsAttributeId = message.getLhsAttributeId();
+		}
+		if (!canReuseLhsStats) {
+			this.lhsStatistics = null;
+		}
+
+		// Request statistics only if not cached
+		if (!canReuseLhsStats) {
+			this.localDataProvider.tell(new DataProvider.RequestColumnStatisticsMessage(
+					message.getLhsAttributeId(), this.getContext().getSelf()));
+		}
 		message.getRhsDataProvider().tell(new DataProvider.RequestColumnStatisticsMessage(
 				message.getRhsAttributeId(), this.getContext().getSelf()));
 
@@ -263,8 +287,17 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 					this.dependencyWorkerId);
 
 			// Request full column data for validation
-			this.localDataProvider.tell(new DataProvider.RequestColumnMessage(
-					this.currentTask.getLhsAttributeId(), this.getContext().getSelf(), this.largeMessageProxy));
+			// Only request LHS data if not already cached
+			if (this.lhsData == null || this.cachedLhsAttributeId != this.currentTask.getLhsAttributeId()) {
+				this.localDataProvider.tell(new DataProvider.RequestColumnMessage(
+						this.currentTask.getLhsAttributeId(), this.getContext().getSelf(), this.largeMessageProxy));
+			} else {
+				this.getContext().getLog().info(
+						"DependencyWorker-{} reusing cached LHS column data for attribute {}",
+						this.dependencyWorkerId, this.currentTask.getLhsAttributeId());
+			}
+
+			// Always request RHS data (changes every task)
 			this.currentTask.getRhsDataProvider().tell(new DataProvider.RequestColumnMessage(
 					this.currentTask.getRhsAttributeId(), this.getContext().getSelf(), this.largeMessageProxy));
 		}
@@ -294,9 +327,9 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	 */
 	private void clearTaskState() {
 		this.currentTask = null;
-		this.lhsData = null;
+		// Keep lhsData and lhsStatistics cached for potential reuse
+		// Keep cachedLhsAttributeId to track what's cached
 		this.rhsData = null;
-		this.lhsStatistics = null;
 		this.rhsStatistics = null;
 	}
 
