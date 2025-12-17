@@ -195,16 +195,13 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	// Validation phase state
 	private Map<Integer, Queue<int[]>> workerTaskQueues; // Per-worker task queues for locality
-	private int totalTasks; // Total tasks generated (never changes after initialization)
-	private int completedTasks;
-	private int prunedTasks; // Tasks skipped due to transitivity pruning
 	private int totalINDsFound;
+	private int totalTasks;
+	private int completedTasks;
+	private int transitivitySkips = 0;
+	private int statisticSkips = 0;
 
-	private long tasksSkippedByStatistics = 0;
-	private long tasksRequiringFullData = 0;
-
-	// Transitivity pruning: Graph-based IND storage for efficient transitivity
-	// checks
+	// Transitivity pruning: Graph-based IND storage for transitivity checks
 	// Maps lhs -> set of rhs where lhs ⊆ rhs
 	private Map<Integer, Set<Integer>> indGraph;
 
@@ -495,9 +492,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private Behavior<Message> handle(ResultMessage message) {
 		this.completedTasks++;
 		if (message.isUsedPruning()) {
-			this.tasksSkippedByStatistics++;
-		} else {
-			this.tasksRequiringFullData++;
+			this.statisticSkips++;
 		}
 		this.getContext().getLog().info(
 				"ResultMessage! {} INDs from DependencyWorker-{} ({} of {} tasks completed) - Pruned: {}",
@@ -978,7 +973,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		this.totalTasks = totalTasksGenerated;
 		this.completedTasks = 0;
-		this.prunedTasks = 0; // Reset pruned task counter
+		this.transitivitySkips = 0;
 		this.totalINDsFound = 0;
 
 		this.getContext().getLog().info("Generated {} validation tasks distributed across {} DependencyWorkers",
@@ -1017,26 +1012,21 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 					long discoveryTime = System.currentTimeMillis() - this.startTime;
 					// Log mining completion
 					this.getContext().getLog().info("Finished mining within {} ms!", discoveryTime);
+                    // Log pruning statistics
+                    if (this.totalTasks > 0) {
+                        int totalSkips = this.transitivitySkips + this.statisticSkips;
+                        int fullDataTasks = this.totalTasks - totalSkips;
+                        double pruningPercentage = (totalSkips * 100.0) / this.totalTasks;
 
-					// Log pruning statistics
-					long totalResolved = this.tasksSkippedByStatistics + this.tasksRequiringFullData;
-					if (totalResolved > 0) {
-						double percentage = (double) this.tasksSkippedByStatistics / totalResolved * 100.0;
-						this.getContext().getLog().info(
-								"Statistical Pruning: {} tasks resolved by stats ({}%), {} tasks required full data",
-								this.tasksSkippedByStatistics,
-								String.format("%.2f", percentage),
-								this.tasksRequiringFullData);
-					}
-
-					// Log transitivity pruning statistics
-					if (this.totalTasks > 0) {
-						double pruningPercentage = (this.prunedTasks * 100.0) / this.totalTasks;
-						this.getContext().getLog().info(
-								"Transitivity Pruning: {} tasks pruned out of {} ({}%)",
-								this.prunedTasks, this.totalTasks,
-								String.format("%.2f", pruningPercentage));
-					}
+                        this.getContext().getLog().info(
+                                "Pruned {} tasks out of {} ({}%): statistics - {}, transitivity - {}, full data - {}",
+                                totalSkips,
+                                this.totalTasks,
+                                String.format("%.2f", pruningPercentage),
+                                this.statisticSkips,
+                                this.transitivitySkips,
+                                fullDataTasks);
+                    }
 					// Log total INDs found
 					this.getContext().getLog().info("Total Inclusion Dependencies found: {}", this.totalINDsFound);
 				} else {
@@ -1054,7 +1044,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		// Check if this task can be pruned via bidirectional transitivity
 		if (canPruneByTransitivity(lhsAttr, rhsAttr)) {
-			this.prunedTasks++;
+			this.transitivitySkips++;
 			this.completedTasks++; // Count as completed to maintain progress tracking
 
 			// Since we only prune when BOTH directions can be inferred,
