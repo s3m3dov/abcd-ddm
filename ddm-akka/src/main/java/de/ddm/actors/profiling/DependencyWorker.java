@@ -65,7 +65,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	public static class ColumnDataMessage implements Message {
 		private static final long serialVersionUID = -1234567890123456782L;
 		int attributeId;
-		Set<String> columnData;
+		List<String> columnData;
 	}
 
 	@Getter
@@ -116,8 +116,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 	// Current task state
 	private ValidateTaskMessage currentTask = null;
-	private Set<String> lhsData = null;
-	private Set<String> rhsData = null;
+	private List<String> lhsData = null;
+	private List<String> rhsData = null;
 	private int cachedLhsAttributeId = -1; // Track cached LHS attribute for reuse
 
 	private ColumnStatistics lhsStatistics = null;
@@ -429,9 +429,10 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	/////////////////
 
 	private void executeValidation() {
-		// Check both directions since we have both datasets loaded
-		boolean lhsSubsetRhs = this.rhsData.containsAll(this.lhsData); // lhs ⊆ rhs
-		boolean rhsSubsetLhs = this.lhsData.containsAll(this.rhsData); // rhs ⊆ lhs
+		// Check both directions using binary search on sorted lists
+		// Both lists are already sorted by DataProvider
+		boolean lhsSubsetRhs = isSortedSubset(this.lhsData, this.rhsData); // lhs ⊆ rhs
+		boolean rhsSubsetLhs = isSortedSubset(this.rhsData, this.lhsData); // rhs ⊆ lhs
 
 		// Build result arrays for discovered INDs
 		List<Integer> lhsList = new ArrayList<>();
@@ -464,6 +465,32 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 		// Clear task state (ready for next assignment)
 		clearTaskState();
+	}
+
+	/**
+	 * Check if subset is a subset of superset using binary search.
+	 * Both lists must be sorted in ascending order.
+	 */
+	private boolean isSortedSubset(List<String> subset, List<String> superset) {
+		// Empty set is subset of any set
+		if (subset.isEmpty()) {
+			return true;
+		}
+
+		// Non-empty set cannot be subset of empty set
+		if (superset.isEmpty()) {
+			return false;
+		}
+
+		// Check each element in subset using binary search
+		for (String element : subset) {
+			if (Collections.binarySearch(superset, element) < 0) {
+				// Element not found in superset
+				return false;
+			}
+		}
+
+		return true;
 	}
 
 }
