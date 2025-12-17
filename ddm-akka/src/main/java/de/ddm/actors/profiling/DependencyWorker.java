@@ -14,6 +14,7 @@ import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 
+import de.ddm.structures.ColumnStatistics;
 import java.util.*;
 
 public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message> {
@@ -67,6 +68,14 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		Set<String> columnData;
 	}
 
+	@Getter
+	@NoArgsConstructor
+	@AllArgsConstructor
+	public static class ColumnStatisticsMessage implements Message {
+		private static final long serialVersionUID = 846284628462L;
+		ColumnStatistics statistics;
+	}
+
 	////////////////////////
 	// Actor Construction //
 	////////////////////////
@@ -110,6 +119,9 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	private Set<String> lhsData = null;
 	private Set<String> rhsData = null;
 
+	private ColumnStatistics lhsStatistics = null;
+	private ColumnStatistics rhsStatistics = null;
+
 	////////////////////
 	// Actor Behavior //
 	////////////////////
@@ -120,6 +132,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 				.onMessage(ReceptionistListingMessage.class, this::handle)
 				.onMessage(SetWorkerIdMessage.class, this::handle)
 				.onMessage(ValidateTaskMessage.class, this::handle)
+				.onMessage(ColumnStatisticsMessage.class, this::handle)
 				.onMessage(ColumnDataMessage.class, this::handle)
 				.build();
 	}
@@ -156,15 +169,206 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		this.currentTask = message;
 		this.lhsData = null;
 		this.rhsData = null;
+		this.lhsStatistics = null;
+		this.rhsStatistics = null;
 
-		// Request both columns from their respective DataProviders
-		// Include LargeMessageProxy reference for receiving large responses
-		this.localDataProvider.tell(new DataProvider.RequestColumnMessage(
-				message.getLhsAttributeId(), this.getContext().getSelf(), this.largeMessageProxy));
-		message.getRhsDataProvider().tell(new DataProvider.RequestColumnMessage(
-				message.getRhsAttributeId(), this.getContext().getSelf(), this.largeMessageProxy));
+		// Request statistics first
+		this.localDataProvider.tell(new DataProvider.RequestColumnStatisticsMessage(
+				message.getLhsAttributeId(), this.getContext().getSelf()));
+		message.getRhsDataProvider().tell(new DataProvider.RequestColumnStatisticsMessage(
+				message.getRhsAttributeId(), this.getContext().getSelf()));
 
 		return this;
+	}
+
+	private Behavior<Message> handle(ColumnStatisticsMessage message) {
+		if (this.currentTask == null)
+			return this;
+
+		ColumnStatistics stats = message.getStatistics();
+
+		if (stats.getAttributeId() == this.currentTask.getLhsAttributeId()) {
+			this.lhsStatistics = stats;
+			this.getContext().getLog().info(
+					"DependencyWorker-{} received LHS statistics for attribute {}: cardinality={}, hasNull={}, min={}, max={}",
+					this.dependencyWorkerId, stats.getAttributeId(), stats.getCardinality(),
+					stats.isHasNull(), stats.getMinValue(), stats.getMaxValue());
+		} else if (stats.getAttributeId() == this.currentTask.getRhsAttributeId()) {
+			this.rhsStatistics = stats;
+			this.getContext().getLog().info(
+					"DependencyWorker-{} received RHS statistics for attribute {}: cardinality={}, hasNull={}, min={}, max={}",
+					this.dependencyWorkerId, stats.getAttributeId(), stats.getCardinality(),
+					stats.isHasNull(), stats.getMinValue(), stats.getMaxValue());
+		}
+
+		if (this.lhsStatistics != null && this.rhsStatistics != null) {
+			this.checkStatisticsAndDecide();
+		}
+
+		return this;
+	}
+
+	private void checkStatisticsAndDecide() {
+		this.getContext().getLog().info(
+				"DependencyWorker-{} analyzing statistics for task: {} ⊆ {} (bidirectional)",
+				this.dependencyWorkerId,
+				this.currentTask.getLhsAttributeId(),
+				this.currentTask.getRhsAttributeId());
+
+		// Check both directions
+		Boolean lhsSubsetRhs = checkSubset(this.lhsStatistics, this.rhsStatistics);
+		Boolean rhsSubsetLhs = checkSubset(this.rhsStatistics, this.lhsStatistics);
+
+		// Log the pruning decision for each direction
+		logPruningDecision("LHS ⊆ RHS", this.currentTask.getLhsAttributeId(),
+				this.currentTask.getRhsAttributeId(), lhsSubsetRhs);
+		logPruningDecision("RHS ⊆ LHS", this.currentTask.getRhsAttributeId(),
+				this.currentTask.getLhsAttributeId(), rhsSubsetLhs);
+
+		// If BOTH directions are determined (conclusive), report findings and skip data
+		// fetch
+		if (lhsSubsetRhs != null && rhsSubsetLhs != null) {
+			this.getContext().getLog().info(
+					"DependencyWorker-{} ✓ CONCLUSIVE: Both directions determined by statistics - skipping data fetch",
+					this.dependencyWorkerId);
+
+			// Build result lists for discovered INDs
+			List<Integer> lhsList = new ArrayList<>();
+			List<Integer> rhsList = new ArrayList<>();
+
+			if (lhsSubsetRhs) {
+				lhsList.add(this.currentTask.getLhsAttributeId());
+				rhsList.add(this.currentTask.getRhsAttributeId());
+			}
+
+			if (rhsSubsetLhs) {
+				lhsList.add(this.currentTask.getRhsAttributeId());
+				rhsList.add(this.currentTask.getLhsAttributeId());
+			}
+
+			// Send results to DependencyMiner (pruned=true)
+			this.dependencyMiner.tell(new DependencyMiner.ResultMessage(
+					lhsList.stream().mapToInt(Integer::intValue).toArray(),
+					rhsList.stream().mapToInt(Integer::intValue).toArray(),
+					this.dependencyWorkerId,
+					true));
+
+			// Clear task state
+			clearTaskState();
+
+		} else {
+			// At least one direction is inconclusive - fallback to full data validation
+			this.getContext().getLog().info(
+					"DependencyWorker-{} ✗ INCONCLUSIVE: Statistics insufficient - fetching full column data",
+					this.dependencyWorkerId);
+
+			// Request full column data for validation
+			this.localDataProvider.tell(new DataProvider.RequestColumnMessage(
+					this.currentTask.getLhsAttributeId(), this.getContext().getSelf(), this.largeMessageProxy));
+			this.currentTask.getRhsDataProvider().tell(new DataProvider.RequestColumnMessage(
+					this.currentTask.getRhsAttributeId(), this.getContext().getSelf(), this.largeMessageProxy));
+		}
+	}
+
+	/**
+	 * Log the pruning decision for a specific direction
+	 */
+	private void logPruningDecision(String direction, int lhsAttr, int rhsAttr, Boolean result) {
+		if (result == null) {
+			this.getContext().getLog().info(
+					"  {} ({} ⊆ {}): INCONCLUSIVE - cannot determine from statistics alone",
+					direction, lhsAttr, rhsAttr);
+		} else if (result) {
+			this.getContext().getLog().info(
+					"  {} ({} ⊆ {}): TRUE - subset relationship confirmed by statistics",
+					direction, lhsAttr, rhsAttr);
+		} else {
+			this.getContext().getLog().info(
+					"  {} ({} ⊆ {}): FALSE - subset relationship disproven by statistics",
+					direction, lhsAttr, rhsAttr);
+		}
+	}
+
+	/**
+	 * Clear current task state after completion
+	 */
+	private void clearTaskState() {
+		this.currentTask = null;
+		this.lhsData = null;
+		this.rhsData = null;
+		this.lhsStatistics = null;
+		this.rhsStatistics = null;
+	}
+
+	/**
+	 * Check if column A is a subset of column B using statistics-based pruning.
+	 * 
+	 * @param A Statistics for the potential subset column
+	 * @param B Statistics for the potential superset column
+	 * @return true if A ⊆ B is proven, false if disproven, null if inconclusive
+	 */
+	private Boolean checkSubset(ColumnStatistics A, ColumnStatistics B) {
+		// 0. Null-Only Column Check
+		// A column with ONLY nulls/empty strings is NOT a valid IND with any column
+		int effCardinalityA = A.getCardinality() - (A.isHasNull() ? 1 : 0);
+		if (effCardinalityA == 0) {
+			this.getContext().getLog().debug(
+					"    Null-only pruning: {} ⊆ {} = FALSE (column {} contains only nulls/empty strings)",
+					A.getAttributeId(), B.getAttributeId(), A.getAttributeId());
+			return false;
+		}
+
+		// 1. Cardinality Pruning
+		// Effective cardinality of A excludes nulls because "null is subset of every
+		// attr"
+		// Cardinality of B must at least cover the non-null distinct values of A
+		if (effCardinalityA > B.getCardinality()) {
+			this.getContext().getLog().debug(
+					"    Cardinality pruning: {} ⊆ {} = FALSE (effCard({})={} > card({})={})",
+					A.getAttributeId(), B.getAttributeId(),
+					A.getAttributeId(), effCardinalityA,
+					B.getAttributeId(), B.getCardinality());
+			return false;
+		}
+
+		// 2. Min/Max Range Pruning
+		if (A.getMinValue() != null) {
+			// A has values
+			if (B.getMinValue() == null) {
+				// B is empty/nulls only, but A has values -> False
+				this.getContext().getLog().debug(
+						"    Range pruning: {} ⊆ {} = FALSE (A has values but B is empty/null-only)",
+						A.getAttributeId(), B.getAttributeId());
+				return false;
+			}
+
+			// Both have values, check ranges
+			if (A.getMinValue().compareTo(B.getMinValue()) < 0) {
+				this.getContext().getLog().debug(
+						"    Range pruning: {} ⊆ {} = FALSE (min({})='{}' < min({})='{}')",
+						A.getAttributeId(), B.getAttributeId(),
+						A.getAttributeId(), A.getMinValue(),
+						B.getAttributeId(), B.getMinValue());
+				return false;
+			}
+
+			if (A.getMaxValue() != null && B.getMaxValue() != null) {
+				if (A.getMaxValue().compareTo(B.getMaxValue()) > 0) {
+					this.getContext().getLog().debug(
+							"    Range pruning: {} ⊆ {} = FALSE (max({})='{}' > max({})='{}')",
+							A.getAttributeId(), B.getAttributeId(),
+							A.getAttributeId(), A.getMaxValue(),
+							B.getAttributeId(), B.getMaxValue());
+					return false;
+				}
+			}
+		}
+
+		// Cannot prune - statistics are insufficient to determine the relationship
+		this.getContext().getLog().debug(
+				"    No pruning rule applies: {} ⊆ {} = INCONCLUSIVE (need full data comparison)",
+				A.getAttributeId(), B.getAttributeId());
+		return null;
 	}
 
 	private Behavior<Message> handle(ColumnDataMessage message) {
@@ -192,30 +396,41 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	/////////////////
 
 	private void executeValidation() {
-		// Check if LHS ⊆ RHS (all values in LHS exist in RHS)
-		boolean isIND = this.rhsData.containsAll(this.lhsData);
+		// Check both directions since we have both datasets loaded
+		boolean lhsSubsetRhs = this.rhsData.containsAll(this.lhsData); // lhs ⊆ rhs
+		boolean rhsSubsetLhs = this.lhsData.containsAll(this.rhsData); // rhs ⊆ lhs
 
-		// Debug: Show sample data
-		String lhsSample = Arrays.toString(this.lhsData.stream().limit(5).toArray(String[]::new));
-		String rhsSample = Arrays.toString(this.rhsData.stream().limit(5).toArray(String[]::new));
+		// Build result arrays for discovered INDs
+		List<Integer> lhsList = new ArrayList<>();
+		List<Integer> rhsList = new ArrayList<>();
 
+		if (lhsSubsetRhs) {
+			lhsList.add(this.currentTask.getLhsAttributeId());
+			rhsList.add(this.currentTask.getRhsAttributeId());
+		}
+
+		if (rhsSubsetLhs) {
+			lhsList.add(this.currentTask.getRhsAttributeId());
+			rhsList.add(this.currentTask.getLhsAttributeId());
+		}
+
+		// Debug logging
 		this.getContext().getLog().debug(
-				"DependencyWorker-{} validation result for {} ⊆ {}: {} (LHS size: {}, RHS size: {}, LHS sample: {}, RHS sample: {})",
+				"DependencyWorker-{} bidirectional validation: {} ⊆ {}? {}, {} ⊆ {}? {} (LHS size: {}, RHS size: {})",
 				this.dependencyWorkerId,
-				this.currentTask.getLhsAttributeId(), this.lhsData.size(),
-				this.currentTask.getRhsAttributeId(), this.rhsData.size(),
-				isIND, lhsSample, rhsSample);
+				this.currentTask.getLhsAttributeId(), this.currentTask.getRhsAttributeId(), lhsSubsetRhs,
+				this.currentTask.getRhsAttributeId(), this.currentTask.getLhsAttributeId(), rhsSubsetLhs,
+				this.lhsData.size(), this.rhsData.size());
 
-		// Send result to DependencyMiner
+		// Send results to DependencyMiner (may contain 0, 1, or 2 INDs)
 		this.dependencyMiner.tell(new DependencyMiner.ResultMessage(
-				isIND ? new int[] { this.currentTask.getLhsAttributeId() } : new int[0],
-				isIND ? new int[] { this.currentTask.getRhsAttributeId() } : new int[0],
-				this.dependencyWorkerId));
+				lhsList.stream().mapToInt(Integer::intValue).toArray(),
+				rhsList.stream().mapToInt(Integer::intValue).toArray(),
+				this.dependencyWorkerId,
+				false));
 
-		// Clear current task (ready for next assignment)
-		this.currentTask = null;
-		this.lhsData = null;
-		this.rhsData = null;
+		// Clear task state (ready for next assignment)
+		clearTaskState();
 	}
 
 }
