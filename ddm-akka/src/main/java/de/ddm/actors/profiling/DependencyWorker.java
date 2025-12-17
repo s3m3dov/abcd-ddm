@@ -308,9 +308,19 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	 * @return true if A ⊆ B is proven, false if disproven, null if inconclusive
 	 */
 	private Boolean checkSubset(ColumnStatistics A, ColumnStatistics B) {
-		// 1. Cardinality Pruning
-		// Effective cardinality of A excludes nulls because "null is subset of every attr"
+		// 0. Null-Only Column Check
+		// A column with ONLY nulls/empty strings is NOT a valid IND with any column
 		int effCardinalityA = A.getCardinality() - (A.isHasNull() ? 1 : 0);
+		if (effCardinalityA == 0) {
+			this.getContext().getLog().debug(
+					"    Null-only pruning: {} ⊆ {} = FALSE (column {} contains only nulls/empty strings)",
+					A.getAttributeId(), B.getAttributeId(), A.getAttributeId());
+			return false;
+		}
+
+		// 1. Cardinality Pruning
+		// Effective cardinality of A excludes nulls because "null is subset of every
+		// attr"
 		// Cardinality of B must at least cover the non-null distinct values of A
 		if (effCardinalityA > B.getCardinality()) {
 			this.getContext().getLog().debug(
