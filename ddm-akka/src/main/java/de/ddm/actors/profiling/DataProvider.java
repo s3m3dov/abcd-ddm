@@ -61,6 +61,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         Map<Integer, Set<String>> columns;
         int totalExpectedMoves;
         int fromDataProviderId;
+        double avgValueSizeInBytes; // Memory metric from source DataProvider
     }
 
     /**
@@ -322,13 +323,26 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                     entry.getKey(), entry.getValue().size());
         }
 
-        // Step 1: Add the received columns to our local storage
+        // Add the received columns to our local storage
         this.acceptIncomingColumns(message.getColumns());
 
-        // Step 2: Update our memory usage after adding columns
-        this.updateMemoryUsage();
+        // Inherit memory metrics from source DataProvider to avoid expensive measurement
+        if (message.getAvgValueSizeInBytes() > 0) {
+            // If we haven't measured yet, inherit the source's metric
+            if (this.usedMemoryMeasured == 0) {
+                this.avgValueSizeInBytes = message.getAvgValueSizeInBytes();
+                this.getContext().getLog().info(
+                        "DataProvider-{} inherited avgValueSizeInBytes={} bytes from DataProvider-{}",
+                        this.dataProviderId, this.avgValueSizeInBytes, message.getFromDataProviderId());
+            }
+            // Update predicted memory based on new value count
+            this.usedMemoryPredicted = (long) Math.ceil(this.valueCount * this.avgValueSizeInBytes);
+        } else {
+            // Fallback: measure if source didn't provide metrics (shouldn't happen normally)
+            this.updateMemoryUsage();
+        }
 
-        // Step 3: Track progress and report when all moves are complete
+        // Track progress and report when all moves are complete
         this.receivedBatchCount++;
         this.getContext().getLog().info(
                 "DataProvider-{} received {}/{} expected moves",
@@ -388,7 +402,9 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(TransitionToValidationPhaseMessage message) {
-        this.getContext().getLog().info("DataProvider-{} received transition to validation phase message", this.dataProviderId);
+
+        this.getContext().getLog().info("DataProvider-{} received transition to validation phase message",
+                this.dataProviderId);
         this.transitionToValidationPhase();
         return this;
     }
@@ -441,7 +457,8 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         AcceptDataMessage acceptMessage = new AcceptDataMessage(
                 columnsToMove,
                 expectedMoveCount,
-                this.dataProviderId // We are the "from" DataProvider
+                this.dataProviderId, // We are the "from" DataProvider
+                this.avgValueSizeInBytes // Pass our memory metric
         );
 
         this.largeMessageProxy.tell(
@@ -496,14 +513,16 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
      */
     private void reportStatus() {
         // Calculate memory exhaustion
-        boolean overloaded = this.availableMemory < this.usedMemoryPredicted;
+        boolean overloaded = this.usedMemoryPredicted >= this.availableMemory;
 
         // Answer with status
         this.dependencyMiner.tell(new DependencyMiner.StatusMessage(this.dataProviderId, false, overloaded));
 
-        this.getContext().getLog().info("DataProvider-{} Status: overloaded = {} ({} / {})", this.dataProviderId,
+        this.getContext().getLog().info("DataProvider-{} Status: overloaded = {} ({} of {})", this.dataProviderId,
                 overloaded,
-                this.availableMemory / 1024 / 1024, this.usedMemoryPredicted / 1024 / 1024);
+                this.usedMemoryPredicted / 1024 / 1024,
+                this.availableMemory / 1024 / 1024
+        );
     }
 
     /**
