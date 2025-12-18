@@ -93,7 +93,8 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int[] lhss;
 		int[] rhss;
 		int workerId;
-		boolean usedPruning;
+		String lhsToRhsPruningType; // Pruning type for LHS→RHS direction
+		String rhsToLhsPruningType; // Pruning type for RHS→LHS direction
 	}
 
 	////////////////////////
@@ -199,10 +200,12 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private int totalTasks;
 	private int completedTasks;
 	private int transitivitySkips = 0;
-	private int statisticSkips = 0;
 
-	// Transitivity pruning: Graph-based IND storage for transitivity checks
-	// Maps lhs -> set of rhs where lhs ⊆ rhs
+	// Pruning statistics by type (aggregated across all directions)
+	private Map<String, Integer> pruningCountsByType = new HashMap<>();
+	private int totalDirectionsPruned = 0; // Total number of directions pruned (not tasks)
+
+	// Transitivity discovery: Graph-based IND storage for transitivity checks
 	private Map<Integer, Set<Integer>> indGraph;
 
 	// Rebalancing state
@@ -485,13 +488,25 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	private Behavior<Message> handle(ResultMessage message) {
 		this.completedTasks++;
-		if (message.isUsedPruning()) {
-			this.statisticSkips++;
+
+		// Track pruning types for each direction separately
+		String lhsToRhsType = message.getLhsToRhsPruningType();
+		String rhsToLhsType = message.getRhsToLhsPruningType();
+
+		// Count each direction that was pruned
+		if (lhsToRhsType != null && !"NONE".equals(lhsToRhsType)) {
+			this.pruningCountsByType.merge(lhsToRhsType, 1, Integer::sum);
+			this.totalDirectionsPruned++;
 		}
+		if (rhsToLhsType != null && !"NONE".equals(rhsToLhsType)) {
+			this.pruningCountsByType.merge(rhsToLhsType, 1, Integer::sum);
+			this.totalDirectionsPruned++;
+		}
+
 		this.getContext().getLog().info(
-				"ResultMessage! {} INDs from DependencyWorker-{} ({} of {} tasks completed) - Pruned: {}",
+				"ResultMessage! {} INDs from DependencyWorker-{} ({} of {} tasks completed) - Pruned: LHS→RHS: {}, RHS→LHS: {}",
 				message.getLhss().length, message.getWorkerId(), this.completedTasks, this.totalTasks,
-				message.isUsedPruning());
+				lhsToRhsType, rhsToLhsType);
 
 		// Store discovered INDs in graph for transitivity pruning
 		for (int i = 0; i < message.getLhss().length; i++) {
@@ -879,61 +894,70 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	 * DataProvider.
 	 */
 	private void logAttributeDistribution(String label, int[] attributeCounts) {
-        var log = this.getContext().getLog();
+		var log = this.getContext().getLog();
 
-        StringBuilder sb = new StringBuilder(label).append(" | AttributeCounts: ");
-        for (int i = 0; i < attributeCounts.length; i++) {
-            if (i > 0) sb.append(", ");
-            sb.append("DP-").append(i).append(": ").append(attributeCounts[i]);
-        }
-        log.info(sb.toString());
+		StringBuilder sb = new StringBuilder(label).append(" | AttributeCounts: ");
+		for (int i = 0; i < attributeCounts.length; i++) {
+			if (i > 0)
+				sb.append(", ");
+			sb.append("DP-").append(i).append(": ").append(attributeCounts[i]);
+		}
+		log.info(sb.toString());
 
-        if (log.isDebugEnabled()) {
-            for (int dpId = 0; dpId < this.dataProviders.size(); dpId++) {
-                IntList attributeIds = new IntArrayList();
-                for (int attr = 0; attr < this.attribute2dataProvider.length; attr++) {
-                    if (this.attribute2dataProvider[attr] == dpId) {
-                        attributeIds.add(attr);
-                    }
-                }
+		if (log.isDebugEnabled()) {
+			for (int dpId = 0; dpId < this.dataProviders.size(); dpId++) {
+				IntList attributeIds = new IntArrayList();
+				for (int attr = 0; attr < this.attribute2dataProvider.length; attr++) {
+					if (this.attribute2dataProvider[attr] == dpId) {
+						attributeIds.add(attr);
+					}
+				}
 
-                log.debug(
-                        "{} | DataProvider-{} | Attributes: {} -> {}",
-                        label,
-                        dpId,
-                        attributeIds.size(),
-                        attributeIds
-                );
-            }
-        }
-    }
+				log.debug(
+						"{} | DataProvider-{} | Attributes: {} -> {}",
+						label,
+						dpId,
+						attributeIds.size(),
+						attributeIds);
+			}
+		}
+	}
 
-
-    /**
+	/**
 	 * Log validation phase final results including tasks executed, pruning
 	 * statistics, and INDs found
 	 */
 	private void logValidationInfo(long discoveryTime) {
-        var log = this.getContext().getLog();
-        log.info("Tasks: {} of {} | Workers: {} | Time: {}ms | Total INDs: {}",
-                this.completedTasks,
-                this.totalTasks,
-                this.dependencyWorkers.size(),
-                discoveryTime,
-                this.totalINDsFound);
+		var log = this.getContext().getLog();
+		log.info("Tasks: {} of {} | Workers: {} | Time: {}ms | Total INDs: {}",
+				this.completedTasks,
+				this.totalTasks,
+				this.dependencyWorkers.size(),
+				discoveryTime,
+				this.totalINDsFound);
 
-		// Log pruning statistics
+		// Log pruning statistics by direction (not by task)
 		if (this.totalTasks > 0) {
-			int totalSkips = this.transitivitySkips + this.statisticSkips;
-			int fullDataTasks = this.totalTasks - totalSkips;
-			double pruningPercentage = (totalSkips * 100.0) / this.totalTasks;
+			// Total possible directions = 2 * totalTasks (each task checks 2 directions)
+			int totalDirections = this.totalTasks * 2;
+			// Transitivity pruning skips entire tasks (both directions)
+			int transitivityDirections = this.transitivitySkips * 2;
+			// Statistics-based pruning counts individual directions
+			int totalPrunedDirections = transitivityDirections + this.totalDirectionsPruned;
+			double pruningPercentage = (totalPrunedDirections * 100.0) / totalDirections;
 
-            log.info("Pruning Rate: {}% ({} of {})",
-                    String.format("%.2f", pruningPercentage),
-                    totalSkips, this.totalTasks);
-            log.info("  - Statistics-based pruning: {} tasks", this.statisticSkips);
-            log.info("  - Transitivity-based pruning: {} tasks", this.transitivitySkips);
-            log.info("  - Required data fetch: {} tasks", fullDataTasks);
+			log.info("Pruning Rate: {}% ({} of {})",
+					String.format("%.2f", pruningPercentage),
+					totalPrunedDirections, totalDirections);
+			log.info("  - Transitivity-based Pruning: {} directions", transitivityDirections);
+
+			// Log statistics-based pruning by type
+			if (!this.pruningCountsByType.isEmpty()) {
+				for (Map.Entry<String, Integer> entry : this.pruningCountsByType.entrySet()) {
+					log.info("  - {}-based Pruning: {} directions", entry.getKey().toLowerCase(), entry.getValue());
+				}
+			}
+            log.info("  - Required data fetch: {}", totalDirections - totalPrunedDirections);
 		}
 	}
 
@@ -999,6 +1023,8 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.completedTasks = 0;
 		this.transitivitySkips = 0;
 		this.totalINDsFound = 0;
+		this.totalDirectionsPruned = 0;
+		this.pruningCountsByType.clear();
 
 		// Assign initial task to each worker
 		for (int workerId = 0; workerId < numWorkers; workerId++) {
