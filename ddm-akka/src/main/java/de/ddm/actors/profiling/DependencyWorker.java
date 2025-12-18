@@ -216,7 +216,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		// Initialize direction states
 		this.lhsToRhsResult = null;
 		this.rhsToLhsResult = null;
-        this.lhsToRhsState = DirectionState.STATISTICS_PENDING;
+		this.lhsToRhsState = DirectionState.STATISTICS_PENDING;
 		this.rhsToLhsState = DirectionState.STATISTICS_PENDING;
 		this.lhsToRhsPruningType = PruningType.NONE;
 		this.rhsToLhsPruningType = PruningType.NONE;
@@ -375,7 +375,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		this.rhsData = null;
 		this.rhsStatistics = null;
 		// Reset direction states
-        this.lhsToRhsResult = null;
+		this.lhsToRhsResult = null;
 		this.rhsToLhsResult = null;
 		this.lhsToRhsState = DirectionState.PENDING;
 		this.rhsToLhsState = DirectionState.PENDING;
@@ -383,8 +383,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		this.rhsToLhsPruningType = PruningType.NONE;
 	}
 
-    private record PruningResult(Boolean result, PruningType type) {
-    }
+	private record PruningResult(Boolean result, PruningType type) {
+	}
 
 	/**
 	 * Check if column A is a subset of column B using statistics-based pruning.
@@ -406,7 +406,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		}
 
 		// 1. Cardinality Pruning
-		// Effective cardinality of A excludes nulls because "null is subset of every attr"
+		// Effective cardinality of A excludes nulls because "null is subset of every
+		// attr"
 		// Cardinality of B must at least cover the non-null distinct values of A
 		if (effCardinalityA > B.getCardinality()) {
 			this.getContext().getLog().debug(
@@ -594,13 +595,12 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			rhsList.add(this.currentTask.getLhsAttributeId());
 		}
 
-		// Determine if pruning was used (at least one direction was pruned)
+		// Log pruning types if used
 		boolean usedPruning = (this.lhsToRhsState == DirectionState.PRUNED_TRUE ||
 				this.lhsToRhsState == DirectionState.PRUNED_FALSE ||
 				this.rhsToLhsState == DirectionState.PRUNED_TRUE ||
 				this.rhsToLhsState == DirectionState.PRUNED_FALSE);
 
-		// Log pruning types if used
 		if (usedPruning) {
 			this.getContext().getLog().info(
 					"DependencyWorker-{} pruning used: LHS→RHS={}, RHS→LHS={}",
@@ -609,12 +609,13 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 					this.rhsToLhsPruningType);
 		}
 
-		// Send results to DependencyMiner
+		// Send results to DependencyMiner with pruning type information
 		this.dependencyMiner.tell(new DependencyMiner.ResultMessage(
 				lhsList.stream().mapToInt(Integer::intValue).toArray(),
 				rhsList.stream().mapToInt(Integer::intValue).toArray(),
 				this.dependencyWorkerId,
-				usedPruning));
+				this.lhsToRhsPruningType.name(),
+				this.rhsToLhsPruningType.name()));
 
 		// Clear task state (ready for next assignment)
 		clearTaskState();
