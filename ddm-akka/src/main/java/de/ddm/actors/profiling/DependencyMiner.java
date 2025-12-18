@@ -949,12 +949,12 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			log.info("Pruning Rate: {}% ({} of {})",
 					String.format("%.2f", pruningPercentage),
 					totalPrunedDirections, totalDirections);
-			log.info("  - Transitivity-based Pruning: {} directions", transitivityDirections);
+			log.info("  - Transitivity-based pruning: {} directions", transitivityDirections);
 
 			// Log statistics-based pruning by type
 			if (!this.pruningCountsByType.isEmpty()) {
 				for (Map.Entry<String, Integer> entry : this.pruningCountsByType.entrySet()) {
-					log.info("  - {}-based Pruning: {} directions", entry.getKey().toLowerCase(), entry.getValue());
+					log.info("  - {}-based pruning: {} directions", entry.getKey().toLowerCase(), entry.getValue());
 				}
 			}
             log.info("  - Required data fetch: {}", totalDirections - totalPrunedDirections);
