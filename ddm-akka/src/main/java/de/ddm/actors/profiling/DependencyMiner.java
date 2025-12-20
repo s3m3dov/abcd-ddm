@@ -957,7 +957,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 					log.info("  - {}-based pruning: {} directions", entry.getKey().toLowerCase(), entry.getValue());
 				}
 			}
-            log.info("  - Required data fetch: {}", totalDirections - totalPrunedDirections);
+            log.info("Total number of data fetches: {}", totalDirections - totalPrunedDirections);
 		}
 	}
 
