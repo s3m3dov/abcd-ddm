@@ -165,6 +165,10 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	private PruningType lhsToRhsPruningType = PruningType.NONE;
 	private PruningType rhsToLhsPruningType = PruningType.NONE;
 
+	// Data fetch tracking for this task
+	private boolean lhsDataFetched = false;
+	private boolean rhsDataFetched = false;
+
 	////////////////////
 	// Actor Behavior //
 	////////////////////
@@ -220,6 +224,10 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		this.rhsToLhsState = DirectionState.STATISTICS_PENDING;
 		this.lhsToRhsPruningType = PruningType.NONE;
 		this.rhsToLhsPruningType = PruningType.NONE;
+
+		// Reset data fetch tracking
+		this.lhsDataFetched = false;
+		this.rhsDataFetched = false;
 
 		// Check if we can reuse cached LHS data from previous task
 		boolean canReuseLhsData = (this.lhsData != null &&
@@ -474,11 +482,13 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		if (needLhsData) {
 			this.localDataProvider.tell(new DataProvider.RequestColumnMessage(
 					this.currentTask.getLhsAttributeId(), this.getContext().getSelf(), this.largeMessageProxy));
+			this.lhsDataFetched = true;
 		}
 
 		if (needRhsData) {
 			this.currentTask.getRhsDataProvider().tell(new DataProvider.RequestColumnMessage(
 					this.currentTask.getRhsAttributeId(), this.getContext().getSelf(), this.largeMessageProxy));
+			this.rhsDataFetched = true;
 		}
 
 		// If we already have the data, validate immediately
@@ -507,11 +517,13 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		if (needRhsData) {
 			this.currentTask.getRhsDataProvider().tell(new DataProvider.RequestColumnMessage(
 					this.currentTask.getRhsAttributeId(), this.getContext().getSelf(), this.largeMessageProxy));
+			this.rhsDataFetched = true;
 		}
 
 		if (needLhsData) {
 			this.localDataProvider.tell(new DataProvider.RequestColumnMessage(
 					this.currentTask.getLhsAttributeId(), this.getContext().getSelf(), this.largeMessageProxy));
+			this.lhsDataFetched = true;
 		}
 
 		// If we already have the data, validate immediately
@@ -609,13 +621,15 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 					this.rhsToLhsPruningType);
 		}
 
-		// Send results to DependencyMiner with pruning type information
+		// Send results to DependencyMiner with pruning type information & data fetch counts
 		this.dependencyMiner.tell(new DependencyMiner.ResultMessage(
 				lhsList.stream().mapToInt(Integer::intValue).toArray(),
 				rhsList.stream().mapToInt(Integer::intValue).toArray(),
 				this.dependencyWorkerId,
 				this.lhsToRhsPruningType.name(),
-				this.rhsToLhsPruningType.name()));
+				this.rhsToLhsPruningType.name(),
+				this.lhsDataFetched,
+				this.rhsDataFetched));
 
 		// Clear task state (ready for next assignment)
 		clearTaskState();
