@@ -968,53 +968,59 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				discoveryTime,
 				this.dependencyWorkers.size());
 
-		// Log pruning statistics by direction (not by task)
-		if (this.totalTasks > 0) {
+		// ===== DATA FETCHES =====
+		// With Bloom filters, LHS and RHS fetches are independent:
+		// - LHS is fetched for Bloom filter checks (unless cached)
+		// - RHS is only fetched if Bloom filter is inconclusive (unless cached)
+		int possibleLhsFetches = this.tasksRequiringData; // Max: one LHS fetch per task requiring data
+		int possibleRhsFetches = this.tasksRequiringData; // Max: one RHS fetch per task requiring data
+		int actualLhsFetches = this.totalLhsDataFetches;
+		int actualRhsFetches = this.totalRhsDataFetches;
 
-			// Data Fetches
-			int completedDataFetches = this.totalLhsDataFetches + this.totalRhsDataFetches;
-			int possiblePerDirectionDataFetches = this.tasksRequiringData;
-			int possibleDataFetches = possiblePerDirectionDataFetches * 2;
-            int cachedDataFetches = possibleDataFetches - completedDataFetches;
-            int cachedLhsFetches = possiblePerDirectionDataFetches - this.totalLhsDataFetches;
-            int cachedRhsFetches = possiblePerDirectionDataFetches - this.totalRhsDataFetches;
+		// Cache effectiveness
+		int lhsCacheHits = possibleLhsFetches - actualLhsFetches;
+		double lhsCacheRate = possibleLhsFetches > 0 ? (lhsCacheHits * 100.0) / possibleLhsFetches : 0;
 
-			// Directions
-			int totalDirections = this.totalTasks * 2;
-			int totalPrunedDirections = this.totalDirectionsPruned;
-			double pruningPercentage = (totalPrunedDirections * 100.0) / totalDirections;
+		// RHS avoidance (Bloom filter + cache)
+		int rhsAvoided = possibleRhsFetches - actualRhsFetches;
+		double rhsAvoidanceRate = possibleRhsFetches > 0 ? (rhsAvoided * 100.0) / possibleRhsFetches : 0;
 
-			// ===== TASKS =====
-			log.info("Total tasks: {} (completed: {})",
-					this.totalTasks, this.completedTasks);
-			log.info("  - Fully-pruned (both directions): {}", this.tasksFullyPruned);
-			log.info("  - Half-pruned (one direction): {}", this.tasksHalfPruned);
-			log.info("  - No-pruning (both directions validated): {}",
-					this.tasksRequiringData - this.tasksHalfPruned);
-            log.info("Tasks requiring data: {}% ({})",
-                    String.format("%.2f", (this.tasksRequiringData * 100.0) / this.totalTasks),
-                    this.tasksRequiringData);
-            log.info("Total data fetches: {} of {}", completedDataFetches, possibleDataFetches);
-            log.info("  - Cached: {}% ({} of {})",
-                    String.format("%.2f", (cachedDataFetches * 100.0) / possibleDataFetches),
-                    cachedDataFetches, possibleDataFetches);
-            log.info("      - LHS Cache: {}% ({} of {})",
-                    String.format("%.2f", (cachedLhsFetches * 100.0) / possiblePerDirectionDataFetches),
-                    cachedLhsFetches, possiblePerDirectionDataFetches);
-            log.info("      - RHS Cache: {}% ({} of {})",
-                    String.format("%.2f", (cachedRhsFetches * 100.0) / possiblePerDirectionDataFetches),
-                    cachedRhsFetches, possiblePerDirectionDataFetches);
+		// Directions
+		int totalDirections = this.totalTasks * 2;
+		int totalPrunedDirections = this.totalDirectionsPruned;
+		double pruningPercentage = (totalPrunedDirections * 100.0) / totalDirections;
 
-			// ===== DIRECTIONS =====
-			log.info("Pruning rate: {}% ({} of {} directions pruned)",
-					String.format("%.2f", pruningPercentage),
-					totalPrunedDirections, totalDirections);
-			if (!this.pruningCountsByType.isEmpty()) {
-				for (Map.Entry<String, Integer> entry : this.pruningCountsByType.entrySet()) {
-					log.info("  - {}-based: {} directions", entry.getKey(), entry.getValue());
-				}
+		// ===== TASKS =====
+		log.info("Total tasks: {} (completed: {})",
+				this.totalTasks, this.completedTasks);
+		log.info("  - Fully-pruned (both directions): {}", this.tasksFullyPruned);
+		log.info("  - Half-pruned (one direction): {}", this.tasksHalfPruned);
+		log.info("  - No-pruning (both directions validated): {}",
+				this.tasksRequiringData - this.tasksHalfPruned);
+
+        // ===== DIRECTIONS =====
+		log.info("Pruning rate: {}% ({} of {} directions pruned)",
+				String.format("%.2f", pruningPercentage),
+				totalPrunedDirections, totalDirections);
+		if (!this.pruningCountsByType.isEmpty()) {
+			for (Map.Entry<String, Integer> entry : this.pruningCountsByType.entrySet()) {
+				log.info("  - {}-based: {} directions", entry.getKey(), entry.getValue());
 			}
 		}
+
+		// ===== DATA FETCHES =====
+        log.info("Tasks requiring data: {}% ({})",
+				String.format("%.2f", (this.tasksRequiringData * 100.0) / this.totalTasks),
+				this.tasksRequiringData);
+		log.info("Total data fetches: {} of {} possible",
+				actualLhsFetches + actualRhsFetches,
+				possibleLhsFetches + possibleRhsFetches);
+		log.info("  - LHS fetches: {} of {} ({}% cached)",
+				actualLhsFetches, possibleLhsFetches,
+				String.format("%.2f", lhsCacheRate));
+		log.info("  - RHS fetches: {} of {} ({}% avoided)",
+				actualRhsFetches, possibleRhsFetches,
+				String.format("%.2f", rhsAvoidanceRate));
 	}
 
 	// * VALIDATION PHASE * //
