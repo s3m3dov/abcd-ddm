@@ -8,6 +8,7 @@ import akka.actor.typed.javadsl.Behaviors;
 import akka.actor.typed.javadsl.Receive;
 import akka.actor.typed.receptionist.Receptionist;
 import de.ddm.actors.patterns.LargeMessageProxy;
+import de.ddm.structures.BloomFilter;
 import de.ddm.utils.LoggingInterceptor;
 import de.ddm.utils.MemoryUtils;
 import it.unimi.dsi.fastutil.ints.*;
@@ -133,6 +134,18 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         ActorRef<DependencyWorker.Message> replyTo;
     }
 
+    /**
+     * Message to request Bloom filter for a specific attribute
+     */
+    @Getter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class RequestBloomFilterMessage implements Message {
+        private static final long serialVersionUID = 778899001122334455L;
+        int attributeId;
+        ActorRef<DependencyWorker.Message> replyTo;
+    }
+
     ////////////////////////
     // Actor Construction //
     ////////////////////////
@@ -205,6 +218,9 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     // Statistics for pruning
     private Map<Integer, ColumnStatistics> columnStatistics = new HashMap<>();
 
+    // Bloom filters for pruning
+    private Map<Integer, de.ddm.structures.BloomFilter> bloomFilters = new HashMap<>();
+
     ////////////////////
     // Actor Behavior //
     ////////////////////
@@ -221,6 +237,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 .onMessage(RequestColumnMessage.class, this::handle)
                 .onMessage(TransitionToValidationPhaseMessage.class, this::handle)
                 .onMessage(RequestColumnStatisticsMessage.class, this::handle)
+                .onMessage(RequestBloomFilterMessage.class, this::handle)
                 .build();
     }
 
@@ -376,7 +393,8 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(TransitionToValidationPhaseMessage message) {
-        this.getContext().getLog().info("DataProvider-{} received transition to validation phase message", this.dataProviderId);
+        this.getContext().getLog().info("DataProvider-{} received transition to validation phase message",
+                this.dataProviderId);
         this.logDataProviderInfo();
         this.transitionToValidationPhase();
         return this;
@@ -390,6 +408,22 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         }
 
         message.getReplyTo().tell(new DependencyWorker.ColumnStatisticsMessage(stats));
+        return this;
+    }
+
+    private Behavior<Message> handle(RequestBloomFilterMessage message) {
+        de.ddm.structures.BloomFilter bloomFilter = this.bloomFilters.get(message.getAttributeId());
+        if (bloomFilter == null) {
+            this.getContext().getLog().warn("Bloom filter requested for unknown attribute {}",
+                    message.getAttributeId());
+            return this;
+        }
+
+        this.getContext().getLog().debug("DataProvider-{} serving Bloom filter for attribute {} (size: {} bytes)",
+                this.dataProviderId, message.getAttributeId(), bloomFilter.getSizeInBytes());
+
+        message.getReplyTo().tell(new DependencyWorker.BloomFilterResponseMessage(
+                message.getAttributeId(), bloomFilter));
         return this;
     }
 
@@ -513,6 +547,18 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
 
             this.columnStatistics.put(attribute, new ColumnStatistics(
                     attribute, cardinality, hasNull, minValue, maxValue));
+
+            // Build Bloom filter (1% false positive rate)
+            BloomFilter bloomFilter = new BloomFilter(cardinality);
+            for (String value : column) {
+                bloomFilter.add(value);
+            }
+            this.bloomFilters.put(attribute, bloomFilter);
+
+            this.getContext().getLog().debug(
+                    "DataProvider-{} built Bloom filter for attribute {}: {} elements, {} bytes, {} hash functions",
+                    this.dataProviderId, attribute, cardinality,
+                    bloomFilter.getSizeInBytes(), bloomFilter.getNumHashFunctions());
         }
 
         for (int attribute : attributes) {
@@ -522,6 +568,13 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
             this.sortedColumns.put(attribute, sortedColumn);
         }
         this.columns = null; // Free memory from loading phase
+
+        long totalBloomFilterSize = this.bloomFilters.values().stream()
+                .mapToLong(de.ddm.structures.BloomFilter::getSizeInBytes)
+                .sum();
+        this.getContext().getLog().info(
+                "DataProvider-{} completed transition: {} Bloom filters built, total size: {} KB",
+                this.dataProviderId, this.bloomFilters.size(), totalBloomFilterSize / 1024);
     }
 
     /**
@@ -546,8 +599,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 availMb,
                 columnCount,
                 this.valueCount,
-                Math.round(this.avgValueSizeInBytes * 100) / 100.0
-        );
+                Math.round(this.avgValueSizeInBytes * 100) / 100.0);
 
         if (log.isDebugEnabled() && this.columns != null && !this.columns.isEmpty()) {
             String attrs = this.columns.int2ObjectEntrySet().stream()
