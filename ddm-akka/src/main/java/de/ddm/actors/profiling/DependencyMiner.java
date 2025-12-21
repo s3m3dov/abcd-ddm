@@ -975,6 +975,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			int completedDataFetches = this.totalLhsDataFetches + this.totalRhsDataFetches;
 			int possiblePerDirectionDataFetches = this.tasksRequiringData;
 			int possibleDataFetches = possiblePerDirectionDataFetches * 2;
+            int cachedDataFetches = possibleDataFetches - completedDataFetches;
+            int cachedLhsFetches = possiblePerDirectionDataFetches - this.totalLhsDataFetches;
+            int cachedRhsFetches = possiblePerDirectionDataFetches - this.totalRhsDataFetches;
 
 			// Directions
 			int totalDirections = this.totalTasks * 2;
@@ -984,17 +987,23 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			// ===== TASKS =====
 			log.info("Total tasks: {} (completed: {})",
 					this.totalTasks, this.completedTasks);
-			log.info("  - Fully-pruned (both directions): {} tasks", this.tasksFullyPruned);
-			log.info("  - Half-pruned (one direction): {} tasks", this.tasksHalfPruned);
-			log.info("  - No-pruning (both directions validated): {} tasks",
+			log.info("  - Fully-pruned (both directions): {}", this.tasksFullyPruned);
+			log.info("  - Half-pruned (one direction): {}", this.tasksHalfPruned);
+			log.info("  - No-pruning (both directions validated): {}",
 					this.tasksRequiringData - this.tasksHalfPruned);
-			log.info("Tasks requiring data (half-pruned + no-pruning): {}", this.tasksRequiringData);
-			log.info("  - Total data fetches: {} of {} ({}%)", completedDataFetches, possibleDataFetches,
-					String.format("%.2f", (completedDataFetches * 100.0) / possibleDataFetches));
-			log.info("      - LHS fetches: {} (cached {} times)",
-					this.totalLhsDataFetches, possiblePerDirectionDataFetches - this.totalLhsDataFetches);
-			log.info("      - RHS fetches: {} (cached {} times)",
-					this.totalRhsDataFetches, possiblePerDirectionDataFetches - this.totalRhsDataFetches);
+            log.info("Tasks requiring data: {}% ({})",
+                    String.format("%.2f", (this.tasksRequiringData * 100.0) / this.totalTasks),
+                    this.tasksRequiringData);
+            log.info("Total data fetches: {} of {}", completedDataFetches, possibleDataFetches);
+            log.info("  - Cached: {}% ({} of {})",
+                    String.format("%.2f", (cachedDataFetches * 100.0) / possibleDataFetches),
+                    cachedDataFetches, possibleDataFetches);
+            log.info("      - LHS Cache: {}% ({} of {})",
+                    String.format("%.2f", (cachedLhsFetches * 100.0) / possiblePerDirectionDataFetches),
+                    cachedLhsFetches, possiblePerDirectionDataFetches);
+            log.info("      - RHS Cache: {}% ({} of {})",
+                    String.format("%.2f", (cachedRhsFetches * 100.0) / possiblePerDirectionDataFetches),
+                    cachedRhsFetches, possiblePerDirectionDataFetches);
 
 			// ===== DIRECTIONS =====
 			log.info("Pruning rate: {}% ({} of {} directions pruned)",
