@@ -211,7 +211,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	private Behavior<Message> handle(ValidateTaskMessage message) {
-		this.getContext().getLog().info("DependencyWorker-{} received validation task: {} ⊆ {}",
+		this.getContext().getLog().debug("DependencyWorker-{} received validation task: {} ⊆ {}",
 				this.dependencyWorkerId, message.getLhsAttributeId(), message.getRhsAttributeId());
 
 		// Store current task
@@ -236,7 +236,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 				this.lhsStatistics.getAttributeId() == message.getLhsAttributeId());
 
 		if (canReuseLhsData || canReuseLhsStats) {
-			this.getContext().getLog().info(
+			this.getContext().getLog().debug(
 					"DependencyWorker-{} reusing cached LHS data/stats for attribute {} (data={}, stats={})",
 					this.dependencyWorkerId, message.getLhsAttributeId(), canReuseLhsData, canReuseLhsStats);
 		}
@@ -273,13 +273,13 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 		if (stats.getAttributeId() == this.currentTask.getLhsAttributeId()) {
 			this.lhsStatistics = stats;
-			this.getContext().getLog().info(
+			this.getContext().getLog().debug(
 					"DependencyWorker-{} received LHS statistics for attribute {}: cardinality={}, hasNull={}, min={}, max={}",
 					this.dependencyWorkerId, stats.getAttributeId(), stats.getCardinality(),
 					stats.isHasNull(), stats.getMinValue(), stats.getMaxValue());
 		} else if (stats.getAttributeId() == this.currentTask.getRhsAttributeId()) {
 			this.rhsStatistics = stats;
-			this.getContext().getLog().info(
+			this.getContext().getLog().debug(
 					"DependencyWorker-{} received RHS statistics for attribute {}: cardinality={}, hasNull={}, min={}, max={}",
 					this.dependencyWorkerId, stats.getAttributeId(), stats.getCardinality(),
 					stats.isHasNull(), stats.getMinValue(), stats.getMaxValue());
@@ -293,8 +293,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	private void checkStatisticsAndDecide() {
-		this.getContext().getLog().info(
-				"DependencyWorker-{} analyzing statistics for task: {} ⊆ {} (bidirectional)",
+		this.getContext().getLog().debug(
+				"DependencyWorker-{} analyzing statistics for task: {} ⊆ {}",
 				this.dependencyWorkerId,
 				this.currentTask.getLhsAttributeId(),
 				this.currentTask.getRhsAttributeId());
@@ -309,9 +309,13 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			this.lhsToRhsState = lhsToRhsCheck.result ? DirectionState.PRUNED_TRUE : DirectionState.PRUNED_FALSE;
 			this.lhsToRhsResult = lhsToRhsCheck.result;
 			this.lhsToRhsPruningType = lhsToRhsCheck.type;
+			logDirectionResult(this.currentTask.getLhsAttributeId(), this.currentTask.getRhsAttributeId(),
+					lhsToRhsCheck.result, lhsToRhsCheck.type, true);
 		} else {
 			// Inconclusive - needs data validation
 			this.lhsToRhsState = DirectionState.DATA_PENDING;
+			logDirectionResult(this.currentTask.getLhsAttributeId(), this.currentTask.getRhsAttributeId(),
+					null, PruningType.NONE, true);
 		}
 
 		if (rhsToLhsCheck.result != null) {
@@ -319,31 +323,25 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			this.rhsToLhsState = rhsToLhsCheck.result ? DirectionState.PRUNED_TRUE : DirectionState.PRUNED_FALSE;
 			this.rhsToLhsResult = rhsToLhsCheck.result;
 			this.rhsToLhsPruningType = rhsToLhsCheck.type;
+			logDirectionResult(this.currentTask.getRhsAttributeId(), this.currentTask.getLhsAttributeId(),
+					rhsToLhsCheck.result, rhsToLhsCheck.type, true);
 		} else {
 			// Inconclusive - needs data validation
 			this.rhsToLhsState = DirectionState.DATA_PENDING;
+			logDirectionResult(this.currentTask.getRhsAttributeId(), this.currentTask.getLhsAttributeId(),
+					null, PruningType.NONE, true);
 		}
-
-		// Log the pruning decision for each direction
-		logPruningDecision("LHS ⊆ RHS", this.currentTask.getLhsAttributeId(),
-				this.currentTask.getRhsAttributeId(), lhsToRhsCheck.result, lhsToRhsCheck.type);
-		logPruningDecision("RHS ⊆ LHS", this.currentTask.getRhsAttributeId(),
-				this.currentTask.getLhsAttributeId(), rhsToLhsCheck.result, rhsToLhsCheck.type);
 
 		// Check if both directions are conclusive (no data fetch needed)
 		if (lhsToRhsCheck.result != null && rhsToLhsCheck.result != null) {
-			this.getContext().getLog().info(
-					"DependencyWorker-{} ✓ CONCLUSIVE: Both directions determined by statistics - completing task",
+			this.getContext().getLog().debug(
+					"DependencyWorker-{} both directions determined by statistics",
 					this.dependencyWorkerId);
 			// Both directions are conclusive, complete the task
 			checkTaskCompletion();
 		} else {
-			// At least one direction needs data validation
-			this.getContext().getLog().info(
-					"DependencyWorker-{} ✗ INCONCLUSIVE: At least one direction needs data validation",
-					this.dependencyWorkerId);
-
-			// Send specific messages for each direction that needs data validation
+			// At least one direction needs data validation - send messages for pending
+			// directions
 			if (this.lhsToRhsState == DirectionState.DATA_PENDING) {
 				this.getContext().getSelf().tell(new LhsToRhsCheckMessage());
 			}
@@ -355,21 +353,25 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	/**
-	 * Log the pruning decision for a specific direction
+	 * Log the result for a specific direction
 	 */
-	private void logPruningDecision(String direction, int lhsAttr, int rhsAttr, Boolean result, PruningType type) {
+	private void logDirectionResult(int fromAttr, int toAttr, Boolean result, PruningType type,
+			boolean fromStatistics) {
+		String source = fromStatistics ? "statistics" : "data fetch";
 		if (result == null) {
 			this.getContext().getLog().info(
-					"  {} ({} ⊆ {}): INCONCLUSIVE - cannot determine from statistics alone",
-					direction, lhsAttr, rhsAttr);
+					"DependencyWorker-{}: {} ⊆ {} = INCONCLUSIVE (needs data fetch)",
+					this.dependencyWorkerId, fromAttr, toAttr);
 		} else if (result) {
 			this.getContext().getLog().info(
-					"  {} ({} ⊆ {}): TRUE (type: {}) - subset relationship confirmed by statistics",
-					direction, lhsAttr, rhsAttr, type);
+					"DependencyWorker-{}: {} ⊆ {} = TRUE ({}{})",
+					this.dependencyWorkerId, fromAttr, toAttr, source,
+					type != PruningType.NONE ? ", " + type : "");
 		} else {
 			this.getContext().getLog().info(
-					"  {} ({} ⊆ {}): FALSE (type: {}) - subset relationship disproven by statistics",
-					direction, lhsAttr, rhsAttr, type);
+					"DependencyWorker-{}: {} ⊆ {} = FALSE ({}{})",
+					this.dependencyWorkerId, fromAttr, toAttr, source,
+					type != PruningType.NONE ? ", " + type : "");
 		}
 	}
 
@@ -408,7 +410,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		int effCardinalityA = A.getCardinality() - (A.isHasNull() ? 1 : 0);
 		if (effCardinalityA == 0) {
 			this.getContext().getLog().debug(
-					"    Null-only pruning: {} ⊆ {} = FALSE (column {} contains only nulls/empty strings)",
+					"Null-only check: {} ⊆ {} = FALSE (attr {} is null-only)",
 					A.getAttributeId(), B.getAttributeId(), A.getAttributeId());
 			return new PruningResult(false, PruningType.NULL_ONLY);
 		}
@@ -419,7 +421,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		// Cardinality of B must at least cover the non-null distinct values of A
 		if (effCardinalityA > B.getCardinality()) {
 			this.getContext().getLog().debug(
-					"    Cardinality pruning: {} ⊆ {} = FALSE (effCard({})={} > card({})={})",
+					"Cardinality check: {} ⊆ {} = FALSE (effCard={}>{} > card={}={})",
 					A.getAttributeId(), B.getAttributeId(),
 					A.getAttributeId(), effCardinalityA,
 					B.getAttributeId(), B.getCardinality());
@@ -432,7 +434,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			if (B.getMinValue() == null) {
 				// B is empty/nulls only, but A has values -> False
 				this.getContext().getLog().debug(
-						"    Range pruning: {} ⊆ {} = FALSE (A has values but B is empty/null-only)",
+						"Range check: {} ⊆ {} = FALSE ({} has values, {} is null-only)",
+						A.getAttributeId(), B.getAttributeId(),
 						A.getAttributeId(), B.getAttributeId());
 				return new PruningResult(false, PruningType.RANGE);
 			}
@@ -440,7 +443,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			// Both have values, check ranges
 			if (A.getMinValue().compareTo(B.getMinValue()) < 0) {
 				this.getContext().getLog().debug(
-						"    Range pruning: {} ⊆ {} = FALSE (min({})='{}' < min({})='{}')",
+						"Range check: {} ⊆ {} = FALSE (min={}='{}' < min={}='{}')",
 						A.getAttributeId(), B.getAttributeId(),
 						A.getAttributeId(), A.getMinValue(),
 						B.getAttributeId(), B.getMinValue());
@@ -450,7 +453,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			if (A.getMaxValue() != null && B.getMaxValue() != null) {
 				if (A.getMaxValue().compareTo(B.getMaxValue()) > 0) {
 					this.getContext().getLog().debug(
-							"    Range pruning: {} ⊆ {} = FALSE (max({})='{}' > max({})='{}')",
+							"Range check: {} ⊆ {} = FALSE (max={}='{}' > max={}='{}')",
 							A.getAttributeId(), B.getAttributeId(),
 							A.getAttributeId(), A.getMaxValue(),
 							B.getAttributeId(), B.getMaxValue());
@@ -461,7 +464,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 		// Cannot prune - statistics are insufficient to determine the relationship
 		this.getContext().getLog().debug(
-				"    No pruning rule applies: {} ⊆ {} = INCONCLUSIVE (need full data comparison)",
+				"No pruning applicable: {} ⊆ {} = INCONCLUSIVE",
 				A.getAttributeId(), B.getAttributeId());
 		return new PruningResult(null, PruningType.NONE);
 	}
@@ -472,7 +475,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			return this;
 		}
 
-		this.getContext().getLog().info("DependencyWorker-{} handling LHS ⊆ RHS check", this.dependencyWorkerId);
+		this.getContext().getLog().debug("DependencyWorker-{} handling LHS ⊆ RHS check", this.dependencyWorkerId);
 
 		// Request data if needed
 		boolean needLhsData = (this.lhsData == null
@@ -505,7 +508,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			return this;
 		}
 
-		this.getContext().getLog().info(
+		this.getContext().getLog().debug(
 				"DependencyWorker-{} handling RHS ⊆ LHS check",
 				this.dependencyWorkerId);
 
@@ -554,15 +557,11 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		if (fromAttr == this.currentTask.getLhsAttributeId() && toAttr == this.currentTask.getRhsAttributeId()) {
 			this.lhsToRhsState = DirectionState.VALIDATED;
 			this.lhsToRhsResult = result;
-			this.getContext().getLog().info(
-					"DependencyWorker-{} validated LHS ⊆ RHS: {} ⊆ {} = {}",
-					this.dependencyWorkerId, fromAttr, toAttr, result);
+			logDirectionResult(fromAttr, toAttr, result, PruningType.NONE, false);
 		} else if (fromAttr == this.currentTask.getRhsAttributeId() && toAttr == this.currentTask.getLhsAttributeId()) {
 			this.rhsToLhsState = DirectionState.VALIDATED;
 			this.rhsToLhsResult = result;
-			this.getContext().getLog().info(
-					"DependencyWorker-{} validated RHS ⊆ LHS: {} ⊆ {} = {}",
-					this.dependencyWorkerId, fromAttr, toAttr, result);
+			logDirectionResult(fromAttr, toAttr, result, PruningType.NONE, false);
 		}
 
 		// Check if task is complete
@@ -587,7 +586,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			return;
 		}
 
-		this.getContext().getLog().info(
+		this.getContext().getLog().debug(
 				"DependencyWorker-{} task complete: both directions validated",
 				this.dependencyWorkerId);
 
@@ -607,21 +606,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			rhsList.add(this.currentTask.getLhsAttributeId());
 		}
 
-		// Log pruning types if used
-		boolean usedPruning = (this.lhsToRhsState == DirectionState.PRUNED_TRUE ||
-				this.lhsToRhsState == DirectionState.PRUNED_FALSE ||
-				this.rhsToLhsState == DirectionState.PRUNED_TRUE ||
-				this.rhsToLhsState == DirectionState.PRUNED_FALSE);
-
-		if (usedPruning) {
-			this.getContext().getLog().info(
-					"DependencyWorker-{} pruning used: LHS→RHS={}, RHS→LHS={}",
-					this.dependencyWorkerId,
-					this.lhsToRhsPruningType,
-					this.rhsToLhsPruningType);
-		}
-
-		// Send results to DependencyMiner with pruning type information & data fetch counts
+		// Send results to DependencyMiner with pruning type & data fetch counts
 		this.dependencyMiner.tell(new DependencyMiner.ResultMessage(
 				lhsList.stream().mapToInt(Integer::intValue).toArray(),
 				rhsList.stream().mapToInt(Integer::intValue).toArray(),

@@ -539,7 +539,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 
 		this.getContext().getLog().info(
-				"ResultMessage! {} INDs from DependencyWorker-{} ({} of {} tasks completed) - Pruned: LHS→RHS: {}, RHS→LHS: {} - Fetches: LHS={}, RHS={}",
+				"ResultMessage! {} INDs from DependencyWorker-{} ({} of {} tasks completed) | Pruned: LHS→RHS: {}, RHS→LHS: {} | Fetches: LHS={}, RHS={}",
 				message.getLhss().length, message.getWorkerId(), this.completedTasks, this.totalTasks,
 				lhsToRhsType, rhsToLhsType, message.isLhsDataFetched(), message.isRhsDataFetched());
 
