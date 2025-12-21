@@ -213,7 +213,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	// Task-level tracking: pruning-only vs data-fetch tasks
 	private int tasksFullyPruned = 0; // Tasks where both directions were pruned
 	private int tasksHalfPruned = 0; // Tasks where one direction was pruned, one required data
-	private int tasksRequiringData = 0; // Tasks where at least one direction needed data
 
 	// Transitivity discovery: Graph-based IND storage for transitivity checks
 	private Map<Integer, Set<Integer>> indGraph;
@@ -526,15 +525,11 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		boolean rhsToLhsPruned = (rhsToLhsType != null && !"NONE".equals(rhsToLhsType));
 		boolean bothDirectionsPruned = lhsToRhsPruned && rhsToLhsPruned;
 		boolean oneDirectionPruned = lhsToRhsPruned ^ rhsToLhsPruned; // XOR: exactly one pruned
-		boolean anyDataFetched = message.isLhsDataFetched() || message.isRhsDataFetched();
 
 		if (bothDirectionsPruned) {
 			this.tasksFullyPruned++;
 		} else if (oneDirectionPruned) {
 			this.tasksHalfPruned++;
-		}
-		if (anyDataFetched) {
-			this.tasksRequiringData++;
 		}
 
 		this.getContext().getLog().info(
@@ -968,37 +963,19 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				discoveryTime,
 				this.dependencyWorkers.size());
 
-		// ===== DATA FETCHES =====
-		// With Bloom filters, LHS and RHS fetches are independent:
-		// - LHS is fetched for Bloom filter checks (unless cached)
-		// - RHS is only fetched if Bloom filter is inconclusive (unless cached)
-		int possibleLhsFetches = this.tasksRequiringData; // Max: one LHS fetch per task requiring data
-		int possibleRhsFetches = this.tasksRequiringData; // Max: one RHS fetch per task requiring data
-		int actualLhsFetches = this.totalLhsDataFetches;
-		int actualRhsFetches = this.totalRhsDataFetches;
-
-		// Cache effectiveness
-		int lhsCacheHits = possibleLhsFetches - actualLhsFetches;
-		double lhsCacheRate = possibleLhsFetches > 0 ? (lhsCacheHits * 100.0) / possibleLhsFetches : 0;
-
-		// RHS avoidance (Bloom filter + cache)
-		int rhsAvoided = possibleRhsFetches - actualRhsFetches;
-		double rhsAvoidanceRate = possibleRhsFetches > 0 ? (rhsAvoided * 100.0) / possibleRhsFetches : 0;
-
-		// Directions
-		int totalDirections = this.totalTasks * 2;
-		int totalPrunedDirections = this.totalDirectionsPruned;
-		double pruningPercentage = (totalPrunedDirections * 100.0) / totalDirections;
-
 		// ===== TASKS =====
-		log.info("Total tasks: {} (completed: {})",
-				this.totalTasks, this.completedTasks);
+		log.info("Total tasks: {} (completed: {})", this.totalTasks, this.completedTasks);
 		log.info("  - Fully-pruned (both directions): {}", this.tasksFullyPruned);
 		log.info("  - Half-pruned (one direction): {}", this.tasksHalfPruned);
 		log.info("  - No-pruning (both directions validated): {}",
-				this.tasksRequiringData - this.tasksHalfPruned);
+				this.totalTasks - this.tasksFullyPruned - this.tasksHalfPruned);
 
-        // ===== DIRECTIONS =====
+		// ===== DIRECTIONS =====
+        int totalDirections = this.totalTasks * 2;
+		int totalPrunedDirections = this.totalDirectionsPruned;
+		int totalValidatedDirections = totalDirections - totalPrunedDirections;
+		double pruningPercentage = (totalPrunedDirections * 100.0) / totalDirections;
+        // Log pruning breakdown
 		log.info("Pruning rate: {}% ({} of {} directions pruned)",
 				String.format("%.2f", pruningPercentage),
 				totalPrunedDirections, totalDirections);
@@ -1007,20 +984,11 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				log.info("  - {}-based: {} directions", entry.getKey(), entry.getValue());
 			}
 		}
+		log.info("  - NONE (not prunable): {} directions", totalValidatedDirections);
 
-		// ===== DATA FETCHES =====
-        log.info("Tasks requiring data: {}% ({})",
-				String.format("%.2f", (this.tasksRequiringData * 100.0) / this.totalTasks),
-				this.tasksRequiringData);
-		log.info("Total data fetches: {} of {} possible",
-				actualLhsFetches + actualRhsFetches,
-				possibleLhsFetches + possibleRhsFetches);
-		log.info("  - LHS fetches: {} of {} ({}% cached)",
-				actualLhsFetches, possibleLhsFetches,
-				String.format("%.2f", lhsCacheRate));
-		log.info("  - RHS fetches: {} of {} ({}% avoided)",
-				actualRhsFetches, possibleRhsFetches,
-				String.format("%.2f", rhsAvoidanceRate));
+        // ===== DATA FETCHES =====
+        int totalFetches = this.totalLhsDataFetches + this.totalRhsDataFetches;
+        log.info("Total data fetches: {} (LHS: {}, RHS: {})", totalFetches, this.totalLhsDataFetches, this.totalRhsDataFetches);
 	}
 
 	// * VALIDATION PHASE * //
@@ -1035,8 +1003,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.getContext().getLog().info("Initiating validation phase with {} attributes and {} workers",
 				numAttributes, numWorkers);
 
-		// Tell all DataProviders to transition to validation phase (sort columns and
-		// free memory)
+		// Tell all DataProviders to transition to validation phase (sort columns and free memory)
 		this.getContext().getLog().info("Instructing all DataProviders to transition to validation phase");
 		for (ActorRef<DataProvider.Message> dataProvider : this.dataProviders) {
 			dataProvider.tell(new DataProvider.TransitionToValidationPhaseMessage());
@@ -1065,10 +1032,8 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				continue;
 			}
 
-			// Assign ALL tasks for this LHS attribute to a single worker (round-robin by
-			// LHS)
-			// This ensures the worker loads the LHS once and validates against all RHS
-			// attributes
+			// Assign ALL tasks for this LHS attribute to a single worker (round-robin by LHS)
+			// This ensures the worker loads the LHS once and validates against all RHS attributes
 			int targetWorkerId = colocatedWorkers.get(lhsAttr % colocatedWorkers.size());
 
 			for (int rhsAttr = 0; rhsAttr < numAttributes; rhsAttr++) {
@@ -1088,7 +1053,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.pruningCountsByType.clear();
 		this.tasksFullyPruned = 0;
 		this.tasksHalfPruned = 0;
-		this.tasksRequiringData = 0;
 		this.totalLhsDataFetches = 0;
 		this.totalRhsDataFetches = 0;
 
