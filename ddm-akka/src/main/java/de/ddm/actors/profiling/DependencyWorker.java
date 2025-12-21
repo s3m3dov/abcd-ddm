@@ -282,15 +282,15 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			this.lhsStatistics = null;
 		}
 
-		// Request statistics only for directions that need validation (not transitive)
-		// LHS statistics: needed if LHS→RHS is not transitive
-		if (!message.isLhsToRhsTransitive() && !canReuseLhsStats) {
-			this.localDataProvider.tell(new DataProvider.RequestColumnStatisticsMessage(
-					message.getLhsAttributeId(), this.getContext().getSelf()));
-		}
+		// If both directions are transitive, we can complete immediately without stats
+		boolean bothTransitive = message.isLhsToRhsTransitive() && message.isRhsToLhsTransitive();
 
-		// RHS statistics: needed if RHS→LHS is not transitive
-		if (!message.isRhsToLhsTransitive()) {
+		if (!bothTransitive) {
+			// At least one direction needs validation - request both statistics
+			if (!canReuseLhsStats) {
+				this.localDataProvider.tell(new DataProvider.RequestColumnStatisticsMessage(
+						message.getLhsAttributeId(), this.getContext().getSelf()));
+			}
 			message.getRhsDataProvider().tell(new DataProvider.RequestColumnStatisticsMessage(
 					message.getRhsAttributeId(), this.getContext().getSelf()));
 		}
@@ -332,16 +332,18 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 				this.currentTask.getLhsAttributeId(),
 				this.currentTask.getRhsAttributeId());
 
-		// Check directions with pruning type tracking (skip if already transitive)
+		// Check directions with pruning type tracking
+		// Skip statistics check if direction is already marked as transitive
 		PruningResult lhsToRhsCheck = null;
 		PruningResult rhsToLhsCheck = null;
 
-		// Only check statistics for non-transitive directions
 		if (this.lhsToRhsState != DirectionState.PRUNED_TRUE) {
+			// LHS→RHS not transitive, check with statistics
 			lhsToRhsCheck = checkSubset(this.lhsStatistics, this.rhsStatistics);
 		}
 
 		if (this.rhsToLhsState != DirectionState.PRUNED_TRUE) {
+			// RHS→LHS not transitive, check with statistics
 			rhsToLhsCheck = checkSubset(this.rhsStatistics, this.lhsStatistics);
 		}
 
@@ -386,7 +388,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 		if (lhsToRhsComplete && rhsToLhsComplete) {
 			this.getContext().getLog().debug(
-					"DependencyWorker-{} both directions determined by statistics",
+					"DependencyWorker-{} both directions determined (transitivity/statistics)",
 					this.dependencyWorkerId);
 			// Both directions are conclusive, complete the task
 			checkTaskCompletion();
