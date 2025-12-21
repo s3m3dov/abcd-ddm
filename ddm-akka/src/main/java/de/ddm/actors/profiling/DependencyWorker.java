@@ -53,6 +53,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		int lhsAttributeId;
 		int rhsAttributeId;
 		ActorRef<DataProvider.Message> rhsDataProvider;
+		boolean lhsToRhsTransitive;
+		boolean rhsToLhsTransitive;
 	}
 
 	/**
@@ -211,8 +213,10 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	private Behavior<Message> handle(ValidateTaskMessage message) {
-		this.getContext().getLog().debug("DependencyWorker-{} received validation task: {} ⊆ {}",
-				this.dependencyWorkerId, message.getLhsAttributeId(), message.getRhsAttributeId());
+		this.getContext().getLog().debug(
+				"DependencyWorker-{} received validation task: {} ⊆ {} (transitivity hints: LHS→RHS={}, RHS→LHS={})",
+				this.dependencyWorkerId, message.getLhsAttributeId(), message.getRhsAttributeId(),
+				message.isLhsToRhsTransitive(), message.isRhsToLhsTransitive());
 
 		// Store current task
 		this.currentTask = message;
@@ -228,6 +232,30 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		// Reset data fetch tracking
 		this.lhsDataFetched = false;
 		this.rhsDataFetched = false;
+
+		// Process transitivity hints - mark transitive directions as already proven
+		if (message.isLhsToRhsTransitive()) {
+			this.lhsToRhsState = DirectionState.PRUNED_TRUE;
+			this.lhsToRhsResult = true;
+			this.lhsToRhsPruningType = PruningType.TRANSITIVITY;
+			this.getContext().getLog().debug("  LHS→RHS: TRANSITIVE (already proven, skipping validation)");
+		}
+
+		if (message.isRhsToLhsTransitive()) {
+			this.rhsToLhsState = DirectionState.PRUNED_TRUE;
+			this.rhsToLhsResult = true;
+			this.rhsToLhsPruningType = PruningType.TRANSITIVITY;
+			this.getContext().getLog().debug("  RHS→LHS: TRANSITIVE (already proven, skipping validation)");
+		}
+
+		// Check if both directions are already transitive (task complete immediately)
+		if (message.isLhsToRhsTransitive() && message.isRhsToLhsTransitive()) {
+			this.getContext().getLog().debug(
+					"DependencyWorker-{} both directions transitive - completing task immediately",
+					this.dependencyWorkerId);
+			checkTaskCompletion();
+			return this;
+		}
 
 		// Check if we can reuse cached LHS data from previous task
 		boolean canReuseLhsData = (this.lhsData != null &&
@@ -254,13 +282,18 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			this.lhsStatistics = null;
 		}
 
-		// Request statistics only if not cached
-		if (!canReuseLhsStats) {
+		// Request statistics only for directions that need validation (not transitive)
+		// LHS statistics: needed if LHS→RHS is not transitive
+		if (!message.isLhsToRhsTransitive() && !canReuseLhsStats) {
 			this.localDataProvider.tell(new DataProvider.RequestColumnStatisticsMessage(
 					message.getLhsAttributeId(), this.getContext().getSelf()));
 		}
-		message.getRhsDataProvider().tell(new DataProvider.RequestColumnStatisticsMessage(
-				message.getRhsAttributeId(), this.getContext().getSelf()));
+
+		// RHS statistics: needed if RHS→LHS is not transitive
+		if (!message.isRhsToLhsTransitive()) {
+			message.getRhsDataProvider().tell(new DataProvider.RequestColumnStatisticsMessage(
+					message.getRhsAttributeId(), this.getContext().getSelf()));
+		}
 
 		return this;
 	}
@@ -299,41 +332,59 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 				this.currentTask.getLhsAttributeId(),
 				this.currentTask.getRhsAttributeId());
 
-		// Check both directions with pruning type tracking
-		PruningResult lhsToRhsCheck = checkSubset(this.lhsStatistics, this.rhsStatistics);
-		PruningResult rhsToLhsCheck = checkSubset(this.rhsStatistics, this.lhsStatistics);
+		// Check directions with pruning type tracking (skip if already transitive)
+		PruningResult lhsToRhsCheck = null;
+		PruningResult rhsToLhsCheck = null;
 
-		// Update direction states based on statistics results
-		if (lhsToRhsCheck.result != null) {
-			// Conclusive result for lhs -> rhs
-			this.lhsToRhsState = lhsToRhsCheck.result ? DirectionState.PRUNED_TRUE : DirectionState.PRUNED_FALSE;
-			this.lhsToRhsResult = lhsToRhsCheck.result;
-			this.lhsToRhsPruningType = lhsToRhsCheck.type;
-			logDirectionResult(this.currentTask.getLhsAttributeId(), this.currentTask.getRhsAttributeId(),
-					lhsToRhsCheck.result, lhsToRhsCheck.type, true);
-		} else {
-			// Inconclusive - needs data validation
-			this.lhsToRhsState = DirectionState.DATA_PENDING;
-			logDirectionResult(this.currentTask.getLhsAttributeId(), this.currentTask.getRhsAttributeId(),
-					null, PruningType.NONE, true);
+		// Only check statistics for non-transitive directions
+		if (this.lhsToRhsState != DirectionState.PRUNED_TRUE) {
+			lhsToRhsCheck = checkSubset(this.lhsStatistics, this.rhsStatistics);
 		}
 
-		if (rhsToLhsCheck.result != null) {
-			// Conclusive result for rhs -> lhs
-			this.rhsToLhsState = rhsToLhsCheck.result ? DirectionState.PRUNED_TRUE : DirectionState.PRUNED_FALSE;
-			this.rhsToLhsResult = rhsToLhsCheck.result;
-			this.rhsToLhsPruningType = rhsToLhsCheck.type;
-			logDirectionResult(this.currentTask.getRhsAttributeId(), this.currentTask.getLhsAttributeId(),
-					rhsToLhsCheck.result, rhsToLhsCheck.type, true);
-		} else {
-			// Inconclusive - needs data validation
-			this.rhsToLhsState = DirectionState.DATA_PENDING;
-			logDirectionResult(this.currentTask.getRhsAttributeId(), this.currentTask.getLhsAttributeId(),
-					null, PruningType.NONE, true);
+		if (this.rhsToLhsState != DirectionState.PRUNED_TRUE) {
+			rhsToLhsCheck = checkSubset(this.rhsStatistics, this.lhsStatistics);
+		}
+
+		// Update direction states based on statistics results (only for non-transitive)
+		if (lhsToRhsCheck != null) {
+			if (lhsToRhsCheck.result != null) {
+				// Conclusive result for lhs -> rhs
+				this.lhsToRhsState = lhsToRhsCheck.result ? DirectionState.PRUNED_TRUE : DirectionState.PRUNED_FALSE;
+				this.lhsToRhsResult = lhsToRhsCheck.result;
+				this.lhsToRhsPruningType = lhsToRhsCheck.type;
+				logDirectionResult(this.currentTask.getLhsAttributeId(), this.currentTask.getRhsAttributeId(),
+						lhsToRhsCheck.result, lhsToRhsCheck.type, true);
+			} else {
+				// Inconclusive - needs data validation
+				this.lhsToRhsState = DirectionState.DATA_PENDING;
+				logDirectionResult(this.currentTask.getLhsAttributeId(), this.currentTask.getRhsAttributeId(),
+						null, PruningType.NONE, true);
+			}
+		}
+
+		if (rhsToLhsCheck != null) {
+			if (rhsToLhsCheck.result != null) {
+				// Conclusive result for rhs -> lhs
+				this.rhsToLhsState = rhsToLhsCheck.result ? DirectionState.PRUNED_TRUE : DirectionState.PRUNED_FALSE;
+				this.rhsToLhsResult = rhsToLhsCheck.result;
+				this.rhsToLhsPruningType = rhsToLhsCheck.type;
+				logDirectionResult(this.currentTask.getRhsAttributeId(), this.currentTask.getLhsAttributeId(),
+						rhsToLhsCheck.result, rhsToLhsCheck.type, true);
+			} else {
+				// Inconclusive - needs data validation
+				this.rhsToLhsState = DirectionState.DATA_PENDING;
+				logDirectionResult(this.currentTask.getRhsAttributeId(), this.currentTask.getLhsAttributeId(),
+						null, PruningType.NONE, true);
+			}
 		}
 
 		// Check if both directions are conclusive (no data fetch needed)
-		if (lhsToRhsCheck.result != null && rhsToLhsCheck.result != null) {
+		boolean lhsToRhsComplete = (this.lhsToRhsState == DirectionState.PRUNED_TRUE ||
+				this.lhsToRhsState == DirectionState.PRUNED_FALSE);
+		boolean rhsToLhsComplete = (this.rhsToLhsState == DirectionState.PRUNED_TRUE ||
+				this.rhsToLhsState == DirectionState.PRUNED_FALSE);
+
+		if (lhsToRhsComplete && rhsToLhsComplete) {
 			this.getContext().getLog().debug(
 					"DependencyWorker-{} both directions determined by statistics",
 					this.dependencyWorkerId);
