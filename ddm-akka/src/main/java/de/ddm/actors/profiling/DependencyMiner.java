@@ -95,6 +95,8 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int workerId;
 		String lhsToRhsPruningType; // Pruning type for LHS→RHS direction
 		String rhsToLhsPruningType; // Pruning type for RHS→LHS direction
+		boolean lhsDataFetched; // Was LHS data fetched for this task?
+		boolean rhsDataFetched; // Was RHS data fetched for this task?
 	}
 
 	////////////////////////
@@ -204,6 +206,15 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	// Pruning statistics by type (aggregated across all directions)
 	private Map<String, Integer> pruningCountsByType = new HashMap<>();
 	private int totalDirectionsPruned = 0; // Total number of directions pruned (not tasks)
+
+	// Data fetch tracking (actual fetches performed, accounting for caching)
+	private int totalLhsDataFetches = 0; // Total LHS data fetches
+	private int totalRhsDataFetches = 0; // Total RHS data fetches
+
+	// Task-level tracking: pruning-only vs data-fetch tasks
+	private int tasksFullyPruned = 0; // Tasks where both directions were pruned
+	private int tasksHalfPruned = 0; // Tasks where one direction was pruned, one required data
+	private int tasksRequiringData = 0; // Tasks where at least one direction needed data
 
 	// Transitivity discovery: Graph-based IND storage for transitivity checks
 	private Map<Integer, Set<Integer>> indGraph;
@@ -503,10 +514,34 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			this.totalDirectionsPruned++;
 		}
 
+		// Track actual data fetches (accounting for caching)
+		if (message.isLhsDataFetched()) {
+			this.totalLhsDataFetches++;
+		}
+		if (message.isRhsDataFetched()) {
+			this.totalRhsDataFetches++;
+		}
+
+		// Track task-level pruning effectiveness
+		boolean lhsToRhsPruned = (lhsToRhsType != null && !"NONE".equals(lhsToRhsType));
+		boolean rhsToLhsPruned = (rhsToLhsType != null && !"NONE".equals(rhsToLhsType));
+		boolean bothDirectionsPruned = lhsToRhsPruned && rhsToLhsPruned;
+		boolean oneDirectionPruned = lhsToRhsPruned ^ rhsToLhsPruned; // XOR: exactly one pruned
+		boolean anyDataFetched = message.isLhsDataFetched() || message.isRhsDataFetched();
+
+		if (bothDirectionsPruned) {
+			this.tasksFullyPruned++;
+		} else if (oneDirectionPruned) {
+			this.tasksHalfPruned++;
+		}
+		if (anyDataFetched) {
+			this.tasksRequiringData++;
+		}
+
 		this.getContext().getLog().info(
-				"ResultMessage! {} INDs from DependencyWorker-{} ({} of {} tasks completed) - Pruned: LHS→RHS: {}, RHS→LHS: {}",
+				"ResultMessage! {} INDs from DependencyWorker-{} ({} of {} tasks completed) - Pruned: LHS→RHS: {}, RHS→LHS: {} - Fetches: LHS={}, RHS={}",
 				message.getLhss().length, message.getWorkerId(), this.completedTasks, this.totalTasks,
-				lhsToRhsType, rhsToLhsType);
+				lhsToRhsType, rhsToLhsType, message.isLhsDataFetched(), message.isRhsDataFetched());
 
 		// Store discovered INDs in graph for transitivity pruning
 		for (int i = 0; i < message.getLhss().length; i++) {
@@ -929,35 +964,53 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	 */
 	private void logValidationInfo(long discoveryTime) {
 		var log = this.getContext().getLog();
-		log.info("Tasks: {} of {} | Workers: {} | Time: {}ms | Total INDs: {}",
-				this.completedTasks,
-				this.totalTasks,
-				this.dependencyWorkers.size(),
+		log.info("Total INDs: {} | Time: {}ms | Workers: {}",
+				this.totalINDsFound,
 				discoveryTime,
-				this.totalINDsFound);
+                this.dependencyWorkers.size()
+        );
 
 		// Log pruning statistics by direction (not by task)
 		if (this.totalTasks > 0) {
-			// Total possible directions = 2 * totalTasks (each task checks 2 directions)
+
+            // Data Fetches
+            int completedDataFetches = this.totalLhsDataFetches + this.totalRhsDataFetches;
+            int possiblePerDirectionDataFetches = this.tasksRequiringData;
+			int possibleDataFetches = possiblePerDirectionDataFetches * 2;
+
+			// Directions
 			int totalDirections = this.totalTasks * 2;
-			// Transitivity pruning skips entire tasks (both directions)
 			int transitivityDirections = this.transitivitySkips * 2;
-			// Statistics-based pruning counts individual directions
 			int totalPrunedDirections = transitivityDirections + this.totalDirectionsPruned;
 			double pruningPercentage = (totalPrunedDirections * 100.0) / totalDirections;
 
-			log.info("Pruning Rate: {}% ({} of {})",
+			// ===== TASKS =====
+			log.info("Total tasks: {} (completed: {}, transitivity-skipped: {})",
+					this.totalTasks, this.completedTasks, this.transitivitySkips);
+			log.info("  - Fully-pruned (both directions): {} tasks", this.tasksFullyPruned);
+			log.info("  - Half-pruned (one direction): {} tasks", this.tasksHalfPruned);
+			log.info("  - No-pruning (both directions validated): {} tasks",
+					this.tasksRequiringData - this.tasksHalfPruned);
+			log.info("Tasks requiring data (half-pruned + no-pruning): {}", this.tasksRequiringData);
+            log.info("  - Total data fetches: {} of {} ({}%)", completedDataFetches, possibleDataFetches,
+                    String.format("%.2f", (completedDataFetches * 100.0) / possibleDataFetches)
+                    );
+            log.info("      - LHS fetches: {} (cached {} times)",
+					this.totalLhsDataFetches, possiblePerDirectionDataFetches - this.totalLhsDataFetches);
+            log.info("      - RHS fetches: {} (cached {} times)",
+					this.totalRhsDataFetches, possiblePerDirectionDataFetches - this.totalRhsDataFetches);
+
+
+			// ===== DIRECTIONS =====
+			log.info("Pruning rate: {}% ({} of {} directions pruned)",
 					String.format("%.2f", pruningPercentage),
 					totalPrunedDirections, totalDirections);
-			log.info("  - Transitivity-based pruning: {} directions", transitivityDirections);
-
-			// Log statistics-based pruning by type
+			log.info("  - Transitivity-based: {} directions", transitivityDirections);
 			if (!this.pruningCountsByType.isEmpty()) {
 				for (Map.Entry<String, Integer> entry : this.pruningCountsByType.entrySet()) {
-					log.info("  - {}-based pruning: {} directions", entry.getKey().toLowerCase(), entry.getValue());
+					log.info("  - {}-based: {} directions", entry.getKey(), entry.getValue());
 				}
 			}
-            log.info("Total number of data fetches: {}", totalDirections - totalPrunedDirections);
 		}
 	}
 
@@ -1025,6 +1078,11 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.totalINDsFound = 0;
 		this.totalDirectionsPruned = 0;
 		this.pruningCountsByType.clear();
+		this.tasksFullyPruned = 0;
+		this.tasksHalfPruned = 0;
+		this.tasksRequiringData = 0;
+		this.totalLhsDataFetches = 0;
+		this.totalRhsDataFetches = 0;
 
 		// Assign initial task to each worker
 		for (int workerId = 0; workerId < numWorkers; workerId++) {
