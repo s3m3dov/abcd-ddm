@@ -201,7 +201,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private int totalINDsFound;
 	private int totalTasks;
 	private int completedTasks;
-	private int transitivitySkips = 0;
 
 	// Pruning statistics by type (aggregated across all directions)
 	private Map<String, Integer> pruningCountsByType = new HashMap<>();
@@ -967,45 +966,40 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		log.info("Total INDs: {} | Time: {}ms | Workers: {}",
 				this.totalINDsFound,
 				discoveryTime,
-                this.dependencyWorkers.size()
-        );
+				this.dependencyWorkers.size());
 
 		// Log pruning statistics by direction (not by task)
 		if (this.totalTasks > 0) {
 
-            // Data Fetches
-            int completedDataFetches = this.totalLhsDataFetches + this.totalRhsDataFetches;
-            int possiblePerDirectionDataFetches = this.tasksRequiringData;
+			// Data Fetches
+			int completedDataFetches = this.totalLhsDataFetches + this.totalRhsDataFetches;
+			int possiblePerDirectionDataFetches = this.tasksRequiringData;
 			int possibleDataFetches = possiblePerDirectionDataFetches * 2;
 
 			// Directions
 			int totalDirections = this.totalTasks * 2;
-			int transitivityDirections = this.transitivitySkips * 2;
-			int totalPrunedDirections = transitivityDirections + this.totalDirectionsPruned;
+			int totalPrunedDirections = this.totalDirectionsPruned;
 			double pruningPercentage = (totalPrunedDirections * 100.0) / totalDirections;
 
 			// ===== TASKS =====
-			log.info("Total tasks: {} (completed: {}, transitivity-skipped: {})",
-					this.totalTasks, this.completedTasks, this.transitivitySkips);
+			log.info("Total tasks: {} (completed: {})",
+					this.totalTasks, this.completedTasks);
 			log.info("  - Fully-pruned (both directions): {} tasks", this.tasksFullyPruned);
 			log.info("  - Half-pruned (one direction): {} tasks", this.tasksHalfPruned);
 			log.info("  - No-pruning (both directions validated): {} tasks",
 					this.tasksRequiringData - this.tasksHalfPruned);
 			log.info("Tasks requiring data (half-pruned + no-pruning): {}", this.tasksRequiringData);
-            log.info("  - Total data fetches: {} of {} ({}%)", completedDataFetches, possibleDataFetches,
-                    String.format("%.2f", (completedDataFetches * 100.0) / possibleDataFetches)
-                    );
-            log.info("      - LHS fetches: {} (cached {} times)",
+			log.info("  - Total data fetches: {} of {} ({}%)", completedDataFetches, possibleDataFetches,
+					String.format("%.2f", (completedDataFetches * 100.0) / possibleDataFetches));
+			log.info("      - LHS fetches: {} (cached {} times)",
 					this.totalLhsDataFetches, possiblePerDirectionDataFetches - this.totalLhsDataFetches);
-            log.info("      - RHS fetches: {} (cached {} times)",
+			log.info("      - RHS fetches: {} (cached {} times)",
 					this.totalRhsDataFetches, possiblePerDirectionDataFetches - this.totalRhsDataFetches);
-
 
 			// ===== DIRECTIONS =====
 			log.info("Pruning rate: {}% ({} of {} directions pruned)",
 					String.format("%.2f", pruningPercentage),
 					totalPrunedDirections, totalDirections);
-			log.info("  - Transitivity-based: {} directions", transitivityDirections);
 			if (!this.pruningCountsByType.isEmpty()) {
 				for (Map.Entry<String, Integer> entry : this.pruningCountsByType.entrySet()) {
 					log.info("  - {}-based: {} directions", entry.getKey(), entry.getValue());
@@ -1074,7 +1068,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		this.totalTasks = totalTasksGenerated;
 		this.completedTasks = 0;
-		this.transitivitySkips = 0;
 		this.totalINDsFound = 0;
 		this.totalDirectionsPruned = 0;
 		this.pruningCountsByType.clear();
@@ -1125,41 +1118,15 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int lhsAttr = task[0];
 		int rhsAttr = task[1];
 
-		// Check if this task can be pruned via bidirectional transitivity
-		if (canPruneByTransitivity(lhsAttr, rhsAttr)) {
-			this.transitivitySkips++;
-			this.completedTasks++; // Count as completed to maintain progress tracking
+		// Check each direction for transitivity separately
+		boolean lhsToRhsTransitive = canPruneDirection(lhsAttr, rhsAttr);
+		boolean rhsToLhsTransitive = canPruneDirection(rhsAttr, lhsAttr);
 
-			// Since we only prune when BOTH directions can be inferred,
-			// we need to add both directions to the graph and report both INDs
-
-			// Add both directions to graph for future transitivity checks
-			this.indGraph.computeIfAbsent(lhsAttr, k -> new HashSet<>()).add(rhsAttr);
-			this.indGraph.computeIfAbsent(rhsAttr, k -> new HashSet<>()).add(lhsAttr);
-
-			// Create and report both INDs (we know both are valid through transitivity)
-			List<InclusionDependency> inds = new ArrayList<>();
-
-			// IND 1: lhs ⊆ rhs
-			inds.add(new InclusionDependency(
-					this.attribute2file[lhsAttr], new String[] { this.attribute2name[lhsAttr] },
-					this.attribute2file[rhsAttr], new String[] { this.attribute2name[rhsAttr] }));
-
-			// IND 2: rhs ⊆ lhs
-			inds.add(new InclusionDependency(
-					this.attribute2file[rhsAttr], new String[] { this.attribute2name[rhsAttr] },
-					this.attribute2file[lhsAttr], new String[] { this.attribute2name[lhsAttr] }));
-
-			this.totalINDsFound += 2;
-			this.resultCollector.tell(new ResultCollector.ResultMessage(inds));
-
+		// Log transitivity hints if present
+		if (lhsToRhsTransitive || rhsToLhsTransitive) {
 			this.getContext().getLog().debug(
-					"Pruned task ({} ⊆ {}? AND {} ⊆ {}?) via bidirectional transitivity - both INDs reported",
-					lhsAttr, rhsAttr, rhsAttr, lhsAttr);
-
-			// Recursively assign next task
-			this.assignNextValidationTask(dependencyWorkerId);
-			return;
+					"Task ({} ⊆ {}?) has transitivity: LHS→RHS={}, RHS→LHS={} - sending with hints",
+					lhsAttr, rhsAttr, lhsToRhsTransitive, rhsToLhsTransitive);
 		}
 
 		// Verify locality (LHS should be local to this worker's DataProvider)
@@ -1176,35 +1143,14 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int rhsDataProviderId = this.attribute2dataProvider[rhsAttr];
 		ActorRef<DataProvider.Message> rhsDataProvider = this.dataProviders.get(rhsDataProviderId);
 
-		// Send task to worker
+		// Send task to worker with transitivity hints
 		this.dependencyWorkers.get(dependencyWorkerId)
-				.tell(new DependencyWorker.ValidateTaskMessage(lhsAttr, rhsAttr, rhsDataProvider));
+				.tell(new DependencyWorker.ValidateTaskMessage(lhsAttr, rhsAttr, rhsDataProvider,
+						lhsToRhsTransitive, rhsToLhsTransitive));
 		this.dependencyWorkersActive.set(dependencyWorkerId, true);
 
 		this.getContext().getLog().debug("Assigned task ({} ⊆ {}?) to DependencyWorker-{} (local LHS)", lhsAttr,
 				rhsAttr, dependencyWorkerId);
-	}
-
-	/**
-	 * Check if a task can be pruned via bidirectional transitivity pruning.
-	 * Since DependencyWorker checks both directions (lhs ⊆ rhs AND rhs ⊆ lhs),
-	 * we can only prune the entire task if BOTH directions can be inferred via
-	 * transitivity.
-	 * 
-	 * @param lhsAttr First attribute in the task
-	 * @param rhsAttr Second attribute in the task
-	 * @return true if both lhs ⊆ rhs AND rhs ⊆ lhs can be inferred via transitivity
-	 */
-	private boolean canPruneByTransitivity(int lhsAttr, int rhsAttr) {
-		// Check if lhs ⊆ rhs can be pruned
-		boolean canPruneLhsToRhs = canPruneDirection(lhsAttr, rhsAttr);
-
-		// Check if rhs ⊆ lhs can be pruned
-		boolean canPruneRhsToLhs = canPruneDirection(rhsAttr, lhsAttr);
-
-		// Only prune the entire task if BOTH directions can be pruned
-		// This ensures we don't skip validation when one direction is still unknown
-		return canPruneLhsToRhs && canPruneRhsToLhs;
 	}
 
 	/**
