@@ -518,12 +518,18 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         this.sortedColumns = new Int2ObjectArrayMap<>(this.columns.size());
         IntList attributes = new IntArrayList(this.columns.keySet());
 
-        // Compute statistics before removing columns
+        // Process each column atomically: remove, sort, build stats & BloomFilter
         for (int attribute : attributes) {
-            Set<String> column = this.columns.get(attribute);
+            // Remove column immediately to avoid race conditions
+            Set<String> column = this.columns.remove(attribute);
 
-            int cardinality = column.size();
-            boolean hasNull = column.contains(null) || column.contains("");
+            // Sort the column first
+            List<String> sortedColumn = new ArrayList<>(column);
+            Collections.sort(sortedColumn);
+
+            // Build statistics from sorted column
+            int cardinality = sortedColumn.size();
+            boolean hasNull = sortedColumn.contains(null) || sortedColumn.contains("");
 
             String minValue = null;
             String maxValue = null;
@@ -531,26 +537,29 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
             try {
                 // Filter nulls for min/max computation
                 List<String> validValues = new ArrayList<>();
-                for (String s : column) {
+                for (String s : sortedColumn) {
                     if (s != null && !s.isEmpty()) {
                         validValues.add(s);
                     }
                 }
 
                 if (!validValues.isEmpty()) {
-                    minValue = Collections.min(validValues);
-                    maxValue = Collections.max(validValues);
+                    minValue = validValues.get(0); // First element (min) from sorted list
+                    maxValue = validValues.get(validValues.size() - 1); // Last element (max) from sorted list
                 }
             } catch (Exception e) {
                 // Gracefully handle if comparison fails
+                this.getContext().getLog().error(
+                        "DataProvider-{} error computing min/max for attribute {}: {}",
+                        this.dataProviderId, attribute, e.getMessage());
             }
 
             this.columnStatistics.put(attribute, new ColumnStatistics(
                     attribute, cardinality, hasNull, minValue, maxValue));
 
-            // Build Bloom filter (1% false positive rate)
+            // Build Bloom filter from sorted column (1% false positive rate)
             BloomFilter bloomFilter = new BloomFilter(cardinality);
-            for (String value : column) {
+            for (String value : sortedColumn) {
                 bloomFilter.add(value);
             }
             this.bloomFilters.put(attribute, bloomFilter);
@@ -559,14 +568,11 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                     "DataProvider-{} built Bloom filter for attribute {}: {} elements, {} bytes, {} hash functions",
                     this.dataProviderId, attribute, cardinality,
                     bloomFilter.getSizeInBytes(), bloomFilter.getNumHashFunctions());
-        }
 
-        for (int attribute : attributes) {
-            Set<String> column = this.columns.remove(attribute);
-            List<String> sortedColumn = new ArrayList<>(column);
-            Collections.sort(sortedColumn);
+            // Store sorted column
             this.sortedColumns.put(attribute, sortedColumn);
         }
+
         this.columns = null; // Free memory from loading phase
 
         long totalBloomFilterSize = this.bloomFilters.values().stream()
