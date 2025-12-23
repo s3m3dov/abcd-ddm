@@ -33,7 +33,7 @@ graph TD
         DependencyMiner --> InputReader["InputReader"]
     end
     
-    subgraph Worker Process / Local Workers
+    subgraph Worker Process
         Worker --> DataProvider["DataProvider (Local)"]
         Worker --> DW1["DependencyWorker-1"]
         Worker --> DWN["DependencyWorker-N"]
