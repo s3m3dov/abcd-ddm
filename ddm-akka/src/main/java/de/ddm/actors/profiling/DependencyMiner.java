@@ -99,6 +99,19 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		boolean rhsDataFetched; // Was RHS data fetched for this task?
 	}
 
+	/**
+	 * Message from DataProvider indicating it has completed validation phase
+	 * transition
+	 * (columns sorted, statistics built, Bloom filters ready)
+	 */
+	@Getter
+	@NoArgsConstructor
+	@AllArgsConstructor
+	public static class ValidationPhaseReadyMessage implements Message {
+		private static final long serialVersionUID = -9988776655443322L;
+		int dataProviderId;
+	}
+
 	////////////////////////
 	// Actor Construction //
 	////////////////////////
@@ -221,6 +234,10 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private IntSet rebalancingDataProviderIds = new IntOpenHashSet(); // IDs of DataProviders involved in rebalancing
 	private IntList awaitingDataProviderIds = new IntArrayList(); // IDs of DataProviders waiting for attributes
 
+	// Validation phase synchronization
+	private IntSet dataProvidersReadyForValidation = new IntOpenHashSet();
+	private boolean waitingForDataProvidersReady = false;
+
 	////////////////////
 	// Actor Behavior //
 	////////////////////
@@ -235,6 +252,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				.onMessage(DependencyWorkerRegistrationMessage.class, this::handle)
 				.onMessage(StatusMessage.class, this::handle)
 				.onMessage(ResultMessage.class, this::handle)
+				.onMessage(ValidationPhaseReadyMessage.class, this::handle)
 				.onSignal(Terminated.class, this::handle)
 				.build();
 	}
@@ -282,7 +300,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			}
 		}
 
-        this.logAttributeMapping();
+		this.logAttributeMapping();
 
 		// Wait if no workers have registered yet
 		if (this.dataProviders.isEmpty())
@@ -572,6 +590,24 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private Behavior<Message> handle(Terminated signal) {
 		ActorRef<DependencyWorker.Message> dependencyWorker = signal.getRef().unsafeUpcast();
 		this.dependencyWorkers.remove(dependencyWorker);
+		return this;
+	}
+
+	private Behavior<Message> handle(ValidationPhaseReadyMessage message) {
+		this.getContext().getLog().info("DataProvider-{} ready for validation phase",
+				message.getDataProviderId());
+
+		this.dataProvidersReadyForValidation.add(message.getDataProviderId());
+
+		// Check if all DataProviders are ready
+		if (this.waitingForDataProvidersReady &&
+				this.dataProvidersReadyForValidation.size() == this.dataProviders.size()) {
+			this.getContext().getLog().info("All {} DataProviders ready - starting validation tasks",
+					this.dataProviders.size());
+			this.waitingForDataProvidersReady = false;
+			this.startValidationTasks();
+		}
+
 		return this;
 	}
 
@@ -1013,11 +1049,19 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		if (this.dataProvidersActive.stream().anyMatch(b -> b))
 			return;
 
+		// Prevent re-entry if already waiting for DataProviders
+		if (this.waitingForDataProvidersReady)
+			return;
+
 		this.getContext().getLog().info("Initiating validation phase with {} attributes and {} workers",
 				numAttributes, numWorkers);
 
+		// Initialize ready tracking
+		this.dataProvidersReadyForValidation.clear();
+		this.waitingForDataProvidersReady = true;
+
 		// Tell all DataProviders to transition to validation phase
-        // (sort columns and free memory)
+		// (sort columns and free memory)
 		this.getContext().getLog().info("Instructing all DataProviders to transition to validation phase");
 		for (ActorRef<DataProvider.Message> dataProvider : this.dataProviders) {
 			dataProvider.tell(new DataProvider.TransitionToValidationPhaseMessage());
@@ -1047,8 +1091,8 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			}
 
 			// Assign ALL tasks for this LHS attribute to a single worker
-            // (round-robin by LHS), which ensures the worker loads the LHS once
-            // and validates against all RHS attributes
+			// (round-robin by LHS), which ensures the worker loads the LHS once
+			// and validates against all RHS attributes
 			int targetWorkerId = colocatedWorkers.get(lhsAttr % colocatedWorkers.size());
 
 			for (int rhsAttr = 0; rhsAttr < numAttributes; rhsAttr++) {
@@ -1070,6 +1114,21 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.tasksHalfPruned = 0;
 		this.totalLhsDataFetches = 0;
 		this.totalRhsDataFetches = 0;
+
+		// Wait for ValidationPhaseReadyMessage from all DataProviders
+		this.getContext().getLog().info("Waiting for {} DataProviders to complete validation phase transition",
+				this.dataProviders.size());
+	}
+
+	/**
+	 * Start assigning validation tasks to workers.
+	 * Called after all DataProviders have confirmed they're ready.
+	 */
+	private void startValidationTasks() {
+		int numWorkers = this.dependencyWorkers.size();
+
+		this.getContext().getLog().info("Starting validation with {} tasks across {} workers",
+				this.totalTasks, numWorkers);
 
 		// Assign initial task to each worker
 		for (int workerId = 0; workerId < numWorkers; workerId++) {
