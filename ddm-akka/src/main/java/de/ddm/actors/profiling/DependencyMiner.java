@@ -282,6 +282,8 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			}
 		}
 
+        this.logAttributeMapping();
+
 		// Wait if no workers have registered yet
 		if (this.dataProviders.isEmpty())
 			return this;
@@ -697,6 +699,16 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 	}
 
+	private void logAttributeMapping() {
+		StringBuilder sb = new StringBuilder();
+		sb.append("Attribute Mapping:\n");
+		for (int i = 0; i < this.attribute2name.length; i++) {
+			sb.append(
+					String.format("  [%d] -> %s (%s)\n", i, this.attribute2name[i], this.attribute2file[i].getName()));
+		}
+		this.getContext().getLog().info(sb.toString());
+	}
+
 	// * REBALANCING * //
 	/**
 	 * Trigger rebalancing by redistributing attributes to new DataProviders.
@@ -971,11 +983,11 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				this.totalTasks - this.tasksFullyPruned - this.tasksHalfPruned);
 
 		// ===== DIRECTIONS =====
-        int totalDirections = this.totalTasks * 2;
+		int totalDirections = this.totalTasks * 2;
 		int totalPrunedDirections = this.totalDirectionsPruned;
 		int totalValidatedDirections = totalDirections - totalPrunedDirections;
 		double pruningPercentage = (totalPrunedDirections * 100.0) / totalDirections;
-        // Log pruning breakdown
+		// Log pruning breakdown
 		log.info("Pruning rate: {}% ({} of {} directions pruned)",
 				String.format("%.2f", pruningPercentage),
 				totalPrunedDirections, totalDirections);
@@ -986,9 +998,10 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 		log.info("  - NONE (not prunable): {} directions", totalValidatedDirections);
 
-        // ===== DATA FETCHES =====
-        int totalFetches = this.totalLhsDataFetches + this.totalRhsDataFetches;
-        log.info("Total data fetches: {} (LHS: {}, RHS: {})", totalFetches, this.totalLhsDataFetches, this.totalRhsDataFetches);
+		// ===== DATA FETCHES =====
+		int totalFetches = this.totalLhsDataFetches + this.totalRhsDataFetches;
+		log.info("Total data fetches: {} (LHS: {}, RHS: {})", totalFetches, this.totalLhsDataFetches,
+				this.totalRhsDataFetches);
 	}
 
 	// * VALIDATION PHASE * //
@@ -1003,7 +1016,8 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		this.getContext().getLog().info("Initiating validation phase with {} attributes and {} workers",
 				numAttributes, numWorkers);
 
-		// Tell all DataProviders to transition to validation phase (sort columns and free memory)
+		// Tell all DataProviders to transition to validation phase
+        // (sort columns and free memory)
 		this.getContext().getLog().info("Instructing all DataProviders to transition to validation phase");
 		for (ActorRef<DataProvider.Message> dataProvider : this.dataProviders) {
 			dataProvider.tell(new DataProvider.TransitionToValidationPhaseMessage());
@@ -1032,8 +1046,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				continue;
 			}
 
-			// Assign ALL tasks for this LHS attribute to a single worker (round-robin by LHS)
-			// This ensures the worker loads the LHS once and validates against all RHS attributes
+			// Assign ALL tasks for this LHS attribute to a single worker
+            // (round-robin by LHS), which ensures the worker loads the LHS once
+            // and validates against all RHS attributes
 			int targetWorkerId = colocatedWorkers.get(lhsAttr % colocatedWorkers.size());
 
 			for (int rhsAttr = 0; rhsAttr < numAttributes; rhsAttr++) {
