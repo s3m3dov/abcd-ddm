@@ -189,7 +189,7 @@ sequenceDiagram
 
 To minimize expensive data transfers and comparisons, the system employs several pruning layers:
 
-1. **Transitivity Pruning**: If we know $A \subseteq B$ and $B \subseteq C$, then $A \subseteq C$ is inferred and the validation task is skipped.
+1. **Transitivity Pruning**: The system maintains a graph (`indGraph`) of discovered Inclusion Dependencies. If we know $A \subseteq B$ and $B \subseteq C$, then $A \subseteq C$ is inferred and the validation task is marked as transitive.
 2. **Cardinality Pruning**: If $|A| > |B|$, then $A \not\subseteq B$.
 3. **Range Pruning**: If $\min(A) < \min(B)$ or $\max(A) > \max(B)$, then $A \not\subseteq B$.
 4. **Bloom Filter Pruning**: A probabilistic check using RHS Bloom filter to see if elements of $A$ are present in $B$. If an element is definitely missing, the IND is rejected.
@@ -217,10 +217,11 @@ To minimize expensive data transfers and comparisons, the system employs several
 
 | Optimization | Impact | Description |
 | :--- | :--- | :--- |
-| **Sorted Subset Check** | High | Reduces comparison complexity from quadratic to linear. |
-| **Transitivity** | High | Eliminates a large portion of validation tasks as the "known" IND set grows. |
-| **Bloom Filters** | Medium-High | Prevents full column data transfer for many negative cases. |
-| **Memory Monitoring** | High | Prevents JVM crashes on memory-constrained nodes (e.g., Pi cluster). |
+| **Transitivity** | High | Eliminates a large portion of validation tasks at the Master level as the "known" IND set grows. |
+| **Column Statistics** | High | First line of worker pruning. Prevents checking pairs with incompatible ranges or cardinalities. |
+| **Bloom Filters** | Medium-High | Probabilistic pruning that prevents full column data transfer for many negative cases. |
+| **Sorted Subset Check** | High | Final validation layer, reducing comparison complexity from quadratic to linear. |
 | **LHS Caching** | Medium | Speeds up validation when multiple RHS attributes are checked against the same LHS. |
+| **Memory Monitoring** | High | System-wide protection that prevents JVM crashes on memory-constrained nodes. |
 
 ---
