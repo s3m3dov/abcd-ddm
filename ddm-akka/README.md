@@ -114,18 +114,18 @@ Run master and workers in a single process (not distributed):
 java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar master -w 4
 ```
 
-### Local Distributed Run (Single Machine, 1024 MB, 2+ Worker Nodes) 
+### Local Distributed Run (Single Machine, 1024 MB, 1 Additional Worker Node) 
 
 Run master and multiple workers on the same machine using different terminal windows:
 
-**Terminal 1 - Master (no local workers):**
+**Terminal 1 - Master (2 local workers):**
 ```bash
-java -Xms1024m -Xmx1024m -jar target/ddm-akka.jar master -w 0
+java -Xms1024m -Xmx1024m -jar target/ddm-akka.jar master -w 2
 ```
 
 **Terminal 2 - Worker 1 (default port 7879):**
 ```bash
-java -Xms1024m -Xmx512m -jar target/ddm-akka.jar worker -w 4
+java -Xms1024m -Xmx1024m -jar target/ddm-akka.jar worker -w 4
 ```
 
 ### Local Distributed Run (Single Machine, 512 MB, 5+ Worker Nodes) 
