@@ -855,7 +855,11 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 				de.ddm.structures.BloomFilter rhsBF = this.bloomFilterCache.get(this.currentTask.getRhsAttributeId());
 				if (rhsBF != null) {
 					checkDirectionWithBloomFilter(this.lhsData, rhsBF, true);
-					return this; // Don't continue to normal validation
+					// Only return early if BloomFilter definitively pruned (PRUNED_FALSE)
+					// If inconclusive (DATA_PENDING), continue to normal validation below
+					if (this.lhsToRhsState == DirectionState.PRUNED_FALSE) {
+						return this;
+					}
 				}
 			}
 		} else if (message.getAttributeId() == this.currentTask.getRhsAttributeId()) {
@@ -868,7 +872,11 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 				de.ddm.structures.BloomFilter lhsBF = this.bloomFilterCache.get(this.currentTask.getLhsAttributeId());
 				if (lhsBF != null) {
 					checkDirectionWithBloomFilter(this.rhsData, lhsBF, false);
-					return this; // Don't continue to normal validation
+					// Only return early if BloomFilter definitively pruned (PRUNED_FALSE)
+					// If inconclusive (DATA_PENDING), continue to normal validation below
+					if (this.rhsToLhsState == DirectionState.PRUNED_FALSE) {
+						return this;
+					}
 				}
 			}
 		}
