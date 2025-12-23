@@ -398,6 +398,12 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 this.dataProviderId);
         this.logDataProviderInfo();
         this.transitionToValidationPhase();
+
+        // Notify DependencyMiner that we're ready for validation
+        this.dependencyMiner.tell(new DependencyMiner.ValidationPhaseReadyMessage(this.dataProviderId));
+        this.getContext().getLog().info("DataProvider-{} completed validation phase transition, sent ready message",
+                this.dataProviderId);
+
         return this;
     }
 
