@@ -114,7 +114,21 @@ Run master and workers in a single process (not distributed):
 java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar master -w 4
 ```
 
-### Local Distributed Run (Single Machine)
+### Local Distributed Run (Single Machine, 1024 MB, 2+ Worker Nodes) 
+
+Run master and multiple workers on the same machine using different terminal windows:
+
+**Terminal 1 - Master (no local workers):**
+```bash
+java -Xms1024m -Xmx1024m -jar target/ddm-akka.jar master -w 0
+```
+
+**Terminal 2 - Worker 1 (default port 7879):**
+```bash
+java -Xms1024m -Xmx512m -jar target/ddm-akka.jar worker -w 4
+```
+
+### Local Distributed Run (Single Machine, 512 MB, 5+ Worker Nodes) 
 
 Run master and multiple workers on the same machine using different terminal windows:
 
@@ -125,7 +139,7 @@ java -Xms512m -Xmx512m -jar target/ddm-akka.jar master -w 0
 
 **Terminal 2 - Worker 1 (default port 7879):**
 ```bash
-java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 4
+java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 2
 ```
 
 **Terminal 3 - Worker 2 (custom port):**
@@ -133,15 +147,7 @@ java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 4
 java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 2 -p 7880
 ```
 
-**Terminal 4 - Worker 3 (another custom port):**
-```bash
-java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 1 -p 7881
-```
-
-**Terminal 5 - Worker 4 (another custom port):**
-```bash
-java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 1 -p 7882
-```
+change port number for each additional worker.
 
 > **Important:** Each worker on the same machine must use a different port (`-p` flag).
 
@@ -151,17 +157,17 @@ For running across multiple physical machines or nodes:
 
 **Machine 1 - Master:**
 ```bash
-java -Xms512m -Xmx512m -jar target/ddm-akka.jar master -w 0 -h <master-ip>
+java -Xms1024m -Xmx1024m -jar target/ddm-akka.jar master -w 0 -h <master-ip>
 ```
 
 **Machine 2 - Worker:**
 ```bash
-java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 1 -mh <master-ip> -h <worker2-ip>
+java -Xms1024m -Xmx1024m -jar target/ddm-akka.jar worker -w 1 -mh <master-ip> -h <worker2-ip>
 ```
 
 **Machine 3 - Worker:**
 ```bash
-java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 1 -mh <master-ip> -h <worker3-ip>
+java -Xms1024m -Xmx1024m -jar target/ddm-akka.jar worker -w 1 -mh <master-ip> -h <worker3-ip>
 ```
 
 **Finding IP Addresses:**
