@@ -141,9 +141,10 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     @NoArgsConstructor
     @AllArgsConstructor
     public static class RequestBloomFilterMessage implements Message {
-        private static final long serialVersionUID = 778899001122334455L;
+        private static final long serialVersionUID = 778899001122334456L;
         int attributeId;
         ActorRef<DependencyWorker.Message> replyTo;
+        ActorRef<LargeMessageProxy.Message> replyToLMP;
     }
 
     ////////////////////////
@@ -422,8 +423,11 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         this.getContext().getLog().debug("DataProvider-{} serving Bloom filter for attribute {} (size: {} bytes)",
                 this.dataProviderId, message.getAttributeId(), bloomFilter.getSizeInBytes());
 
-        message.getReplyTo().tell(new DependencyWorker.BloomFilterResponseMessage(
-                message.getAttributeId(), bloomFilter));
+        // Send via LargeMessageProxy to handle large BloomFilters
+        DependencyWorker.BloomFilterResponseMessage response = new DependencyWorker.BloomFilterResponseMessage(
+                message.getAttributeId(), bloomFilter);
+        this.largeMessageProxy.tell(
+                new LargeMessageProxy.SendMessage(response, message.getReplyToLMP()));
         return this;
     }
 

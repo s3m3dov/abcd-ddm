@@ -1,6 +1,7 @@
 package de.ddm.structures;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import de.ddm.serialization.AkkaSerializable;
 import java.util.BitSet;
@@ -17,12 +18,21 @@ import java.util.BitSet;
  * This implementation uses MurmurHash3-based hash functions for fast
  * performance
  * on ARM processors (Raspberry Pi).
+ * 
+ * Note: Uses long[] for serialization instead of BitSet to ensure reliable
+ * Jackson CBOR serialization across distributed Akka cluster nodes.
  */
 public class BloomFilter implements AkkaSerializable {
-    private static final long serialVersionUID = 1234567890123456789L;
+    private static final long serialVersionUID = 1234567890123456790L; // Incremented for serialization compatibility
 
-    @JsonProperty("bitSet")
-    private final BitSet bitSet;
+    // BitSet is transient - not serialized directly
+    @JsonIgnore
+    private transient BitSet bitSet;
+
+    // Serialized as long[] for reliable Jackson CBOR serialization
+    @JsonProperty("bitData")
+    private final long[] bitData;
+
     private final int bitSetSize;
     private final int numHashFunctions;
     private final int expectedElements;
@@ -47,26 +57,29 @@ public class BloomFilter implements AkkaSerializable {
         this.bitSetSize = optimalBitSetSize(expectedElements, falsePositiveRate);
         this.numHashFunctions = optimalNumHashFunctions(expectedElements, bitSetSize);
         this.bitSet = new BitSet(bitSetSize);
+        this.bitData = new long[0]; // Will be populated when needed via toLongArray()
     }
 
     /**
-     * Constructor for Jackson deserialization
+     * Constructor for Jackson deserialization - uses long[] instead of BitSet
      * 
-     * @param bitSet           The bit set
+     * @param bitData          The bit data as long array
      * @param bitSetSize       The size of the bit set
      * @param numHashFunctions The number of hash functions
      * @param expectedElements The expected number of elements
      */
     @JsonCreator
     public BloomFilter(
-            @JsonProperty("bitSet") BitSet bitSet,
+            @JsonProperty("bitData") long[] bitData,
             @JsonProperty("bitSetSize") int bitSetSize,
             @JsonProperty("numHashFunctions") int numHashFunctions,
             @JsonProperty("expectedElements") int expectedElements) {
-        this.bitSet = bitSet;
+        this.bitData = bitData != null ? bitData : new long[0];
         this.bitSetSize = bitSetSize;
         this.numHashFunctions = numHashFunctions;
         this.expectedElements = expectedElements;
+        // Reconstruct BitSet from long array
+        this.bitSet = BitSet.valueOf(this.bitData);
     }
 
     /**
@@ -105,6 +118,17 @@ public class BloomFilter implements AkkaSerializable {
             }
         }
         return true; // Might be present (or false positive)
+    }
+
+    /**
+     * Get the bit data for serialization. This is called by Jackson during
+     * serialization.
+     * 
+     * @return The current bit data as a long array
+     */
+    @JsonProperty("bitData")
+    public long[] getBitData() {
+        return bitSet.toLongArray();
     }
 
     /**
