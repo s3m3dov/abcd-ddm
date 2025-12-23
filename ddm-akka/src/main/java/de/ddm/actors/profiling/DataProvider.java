@@ -234,10 +234,10 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 .onMessage(DataMessage.class, this::handle)
                 .onMessage(MoveDataMessage.class, this::handle)
                 .onMessage(AcceptDataMessage.class, this::handle)
-                .onMessage(RequestColumnMessage.class, this::handle)
                 .onMessage(TransitionToValidationPhaseMessage.class, this::handle)
                 .onMessage(RequestColumnStatisticsMessage.class, this::handle)
                 .onMessage(RequestBloomFilterMessage.class, this::handle)
+                .onMessage(RequestColumnMessage.class, this::handle)
                 .build();
     }
 
