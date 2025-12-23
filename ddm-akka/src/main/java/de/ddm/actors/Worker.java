@@ -48,7 +48,6 @@ public class Worker extends AbstractBehavior<Worker.Message> {
             this.dataProvider = context.spawn(
                     DataProvider.create(),
                     DataProvider.DEFAULT_NAME);
-            context.getLog().info("DataProvider spawned");
 
             for (int i = 0; i < numWorkers; i++) {
                 context.spawn(
@@ -56,7 +55,7 @@ public class Worker extends AbstractBehavior<Worker.Message> {
                         DependencyWorker.DEFAULT_NAME + "-" + i,
                         DispatcherSelector.fromConfig("akka.worker-pinned-dispatcher"));
             }
-            context.getLog().info("{} DependencyWorker actors spawned", numWorkers);
+            context.getLog().info("Worker System spawned 1 DataProvider, {} DependencyWorkers", numWorkers);
         }
     }
 

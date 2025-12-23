@@ -8,6 +8,7 @@ import akka.actor.typed.javadsl.Behaviors;
 import akka.actor.typed.javadsl.Receive;
 import akka.actor.typed.receptionist.Receptionist;
 import de.ddm.actors.patterns.LargeMessageProxy;
+import de.ddm.structures.BloomFilter;
 import de.ddm.utils.LoggingInterceptor;
 import de.ddm.utils.MemoryUtils;
 import it.unimi.dsi.fastutil.ints.*;
@@ -32,6 +33,21 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     public interface Message extends LargeMessageProxy.LargeMessage {
     }
 
+    /**
+     * Message from Receptionist with DependencyMiner service listing
+     */
+    @Getter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class ReceptionistListingMessage implements Message {
+        private static final long serialVersionUID = -8234567890123456789L;
+        Receptionist.Listing listing;
+    }
+
+    /**
+     * Message to deliver a batch of column data for a specific attribute
+     * to the DataProvider during the loading phase
+     */
     @Getter
     @NoArgsConstructor
     @AllArgsConstructor
@@ -42,6 +58,10 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         int expectedBatchCount;
     }
 
+    /**
+     * Message to move specified columns to another DataProvider
+     * in a rebalancing operation
+     */
     @Getter
     @NoArgsConstructor
     @AllArgsConstructor
@@ -54,6 +74,10 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         int expectedMoveCount;
     }
 
+    /**
+     * Message to accept incoming columns from another DataProvider
+     * in a rebalancing operation
+     */
     @Getter
     @NoArgsConstructor
     @AllArgsConstructor
@@ -63,30 +87,6 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         int totalExpectedMoves;
         int fromDataProviderId;
         double avgValueSizeInBytes; // Memory metric from source DataProvider
-    }
-
-    /**
-     * Message to request column data for a specific attribute
-     */
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class RequestColumnMessage implements Message {
-        private static final long serialVersionUID = -3571780705578600223L;
-        int attributeId;
-        ActorRef<DependencyWorker.Message> replyTo;
-        ActorRef<LargeMessageProxy.Message> replyToLMP;
-    }
-
-    /**
-     * Message from Receptionist with DependencyMiner service listing
-     */
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class ReceptionistListingMessage implements Message {
-        private static final long serialVersionUID = -8234567890123456789L;
-        Receptionist.Listing listing;
     }
 
     /**
@@ -112,19 +112,6 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     /**
-     * Debug message to provide information about the data this DataProvider manages
-     */
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class DataInfoDebugMessage implements Message {
-        private static final long serialVersionUID = -1234567890123456L;
-        int dataProviderId;
-        int[] attributes;
-        String[] attributeNames;
-    }
-
-    /**
      * Message to trigger transition from loading phase to validation phase
      * This will sort columns and free memory from loading phase structures
      */
@@ -144,6 +131,32 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         private static final long serialVersionUID = 556677889900112233L;
         int attributeId;
         ActorRef<DependencyWorker.Message> replyTo;
+    }
+
+    /**
+     * Message to request Bloom filter for a specific attribute
+     */
+    @Getter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class RequestBloomFilterMessage implements Message {
+        private static final long serialVersionUID = 778899001122334456L;
+        int attributeId;
+        ActorRef<DependencyWorker.Message> replyTo;
+        ActorRef<LargeMessageProxy.Message> replyToLMP;
+    }
+
+    /**
+     * Message to request column data for a specific attribute
+     */
+    @Getter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class RequestColumnMessage implements Message {
+        private static final long serialVersionUID = -3571780705578600223L;
+        int attributeId;
+        ActorRef<DependencyWorker.Message> replyTo;
+        ActorRef<LargeMessageProxy.Message> replyToLMP;
     }
 
     ////////////////////////
@@ -215,8 +228,9 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     private ActorRef<DependencyMiner.Message> dependencyMiner;
     private int dataProviderId;
 
-    // Statistics for pruning
+    // For pruning
     private Map<Integer, ColumnStatistics> columnStatistics = new HashMap<>();
+    private Map<Integer, BloomFilter> bloomFilters = new HashMap<>();
 
     ////////////////////
     // Actor Behavior //
@@ -231,10 +245,10 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
                 .onMessage(DataMessage.class, this::handle)
                 .onMessage(MoveDataMessage.class, this::handle)
                 .onMessage(AcceptDataMessage.class, this::handle)
-                .onMessage(RequestColumnMessage.class, this::handle)
-                .onMessage(DataInfoDebugMessage.class, this::handle)
                 .onMessage(TransitionToValidationPhaseMessage.class, this::handle)
                 .onMessage(RequestColumnStatisticsMessage.class, this::handle)
+                .onMessage(RequestBloomFilterMessage.class, this::handle)
+                .onMessage(RequestColumnMessage.class, this::handle)
                 .build();
     }
 
@@ -268,7 +282,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         for (int attribute : message.getAttributes()) {
             this.columns.put(attribute, new HashSet<>());
         }
-        this.getContext().getLog().info("DataProvider-{} initialized with {} attributes",
+        this.getContext().getLog().info("DataProvider-{} has been assigned {} attributes",
                 this.dataProviderId, message.getAttributes().length);
         this.reportStatus();
         return this;
@@ -376,15 +390,9 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(RequestColumnMessage message) {
-        Set<String> columnData = this.sortedColumns != null
-                ? new HashSet<>(this.sortedColumns.get(message.getAttributeId())) // Validation phase - return sorted
-                : this.columns.get(message.getAttributeId()); // Loading phase - return unsorted
-
-        if (columnData == null) {
-            this.getContext().getLog().warn("Column data not found for attribute {}",
-                    message.getAttributeId());
-            columnData = Collections.emptySet();
-        }
+        List<String> columnData = this.sortedColumns != null
+                ? new ArrayList<>(this.sortedColumns.get(message.getAttributeId())) // Validation phase - sorted
+                : new ArrayList<>(this.columns.get(message.getAttributeId())); // Loading phase - unsorted
 
         // Send ColumnDataMessage via LargeMessageProxy to handle large payloads
         DependencyWorker.ColumnDataMessage response = new DependencyWorker.ColumnDataMessage(
@@ -395,36 +403,17 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         return this;
     }
 
-    private Behavior<Message> handle(DataInfoDebugMessage message) {
-        this.getContext().getLog().info("========== DEBUG INFO FOR DATAPROVIDER-{} ==========",
-                message.getDataProviderId());
-        this.getContext().getLog().info("Assigned Attributes: {}", Arrays.toString(message.getAttributes()));
-        this.getContext().getLog().info("Attribute Names: {}", Arrays.toString(message.getAttributeNames()));
-
-        // Log current data state
-        this.getContext().getLog().info("Total managed columns: {}", this.columns != null ? this.columns.size() : 0);
-        this.getContext().getLog().info("Total unique values: {}", this.valueCount);
-        this.getContext().getLog().info("Memory usage: {} MB / {} MB",
-                this.usedMemoryPredicted / 1024 / 1024,
-                this.availableMemory / 1024 / 1024);
-
-        // Log detailed column information
-        if (this.columns != null) {
-            for (Int2ObjectMap.Entry<Set<String>> entry : this.columns.int2ObjectEntrySet()) {
-                this.getContext().getLog().info("  Attribute {}: {} unique values",
-                        entry.getIntKey(), entry.getValue().size());
-            }
-        }
-
-        this.getContext().getLog().info("=====================================================");
-        return this;
-    }
-
     private Behavior<Message> handle(TransitionToValidationPhaseMessage message) {
-
         this.getContext().getLog().info("DataProvider-{} received transition to validation phase message",
                 this.dataProviderId);
+        this.logDataProviderInfo();
         this.transitionToValidationPhase();
+
+        // Notify DependencyMiner that we're ready for validation
+        this.dependencyMiner.tell(new DependencyMiner.DataProviderReadyForValidationMessage(this.dataProviderId));
+        this.getContext().getLog().info("DataProvider-{} completed validation phase transition, sent ready message",
+                this.dataProviderId);
+
         return this;
     }
 
@@ -436,6 +425,25 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         }
 
         message.getReplyTo().tell(new DependencyWorker.ColumnStatisticsMessage(stats));
+        return this;
+    }
+
+    private Behavior<Message> handle(RequestBloomFilterMessage message) {
+        BloomFilter bloomFilter = this.bloomFilters.get(message.getAttributeId());
+        if (bloomFilter == null) {
+            this.getContext().getLog().warn("Bloom filter requested for unknown attribute {}",
+                    message.getAttributeId());
+            return this;
+        }
+
+        this.getContext().getLog().debug("DataProvider-{} serving Bloom filter for attribute {} (size: {} bytes)",
+                this.dataProviderId, message.getAttributeId(), bloomFilter.getSizeInBytes());
+
+        // Send via LargeMessageProxy to handle large BloomFilters
+        DependencyWorker.BloomFilterResponseMessage response = new DependencyWorker.BloomFilterResponseMessage(
+                message.getAttributeId(), bloomFilter);
+        this.largeMessageProxy.tell(
+                new LargeMessageProxy.SendMessage(response, message.getReplyToLMP()));
         return this;
     }
 
@@ -530,12 +538,18 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         this.sortedColumns = new Int2ObjectArrayMap<>(this.columns.size());
         IntList attributes = new IntArrayList(this.columns.keySet());
 
-        // Compute statistics before removing columns
+        // Process each column atomically: remove, sort, build stats & BloomFilter
         for (int attribute : attributes) {
-            Set<String> column = this.columns.get(attribute);
+            // Remove column immediately to avoid race conditions
+            Set<String> column = this.columns.remove(attribute);
 
-            int cardinality = column.size();
-            boolean hasNull = column.contains(null) || column.contains("");
+            // Sort the column first
+            List<String> sortedColumn = new ArrayList<>(column);
+            Collections.sort(sortedColumn);
+
+            // Build statistics from sorted column
+            int cardinality = sortedColumn.size();
+            boolean hasNull = sortedColumn.contains(null) || sortedColumn.contains("");
 
             String minValue = null;
             String maxValue = null;
@@ -543,31 +557,82 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
             try {
                 // Filter nulls for min/max computation
                 List<String> validValues = new ArrayList<>();
-                for (String s : column) {
+                for (String s : sortedColumn) {
                     if (s != null && !s.isEmpty()) {
                         validValues.add(s);
                     }
                 }
 
                 if (!validValues.isEmpty()) {
-                    minValue = Collections.min(validValues);
-                    maxValue = Collections.max(validValues);
+                    minValue = validValues.get(0); // First element (min) from sorted list
+                    maxValue = validValues.get(validValues.size() - 1); // Last element (max) from sorted list
                 }
             } catch (Exception e) {
                 // Gracefully handle if comparison fails
+                this.getContext().getLog().error(
+                        "DataProvider-{} error computing min/max for attribute {}: {}",
+                        this.dataProviderId, attribute, e.getMessage());
             }
 
             this.columnStatistics.put(attribute, new ColumnStatistics(
                     attribute, cardinality, hasNull, minValue, maxValue));
-        }
 
-        for (int attribute : attributes) {
-            Set<String> column = this.columns.remove(attribute);
-            List<String> sortedColumn = new ArrayList<>(column);
-            Collections.sort(sortedColumn);
+            // Build Bloom filter from sorted column (1% false positive rate)
+            BloomFilter bloomFilter = new BloomFilter(cardinality);
+            for (String value : sortedColumn) {
+                bloomFilter.add(value);
+            }
+            this.bloomFilters.put(attribute, bloomFilter);
+
+            this.getContext().getLog().debug(
+                    "DataProvider-{} built Bloom filter for attribute {}: {} elements, {} bytes, {} hash functions",
+                    this.dataProviderId, attribute, cardinality,
+                    bloomFilter.getSizeInBytes(), bloomFilter.getNumHashFunctions());
+
+            // Store sorted column
             this.sortedColumns.put(attribute, sortedColumn);
         }
+
         this.columns = null; // Free memory from loading phase
+
+        long totalBloomFilterSize = this.bloomFilters.values().stream()
+                .mapToLong(BloomFilter::getSizeInBytes)
+                .sum();
+        this.getContext().getLog().info(
+                "DataProvider-{} completed transition: {} Bloom filters built, total size: {} KB",
+                this.dataProviderId, this.bloomFilters.size(), totalBloomFilterSize / 1024);
+    }
+
+    /**
+     * Log comprehensive information about this DataProvider's state
+     */
+    private void logDataProviderInfo() {
+        var log = this.getContext().getLog();
+        String prefix = "DataProvider-" + this.dataProviderId;
+
+        int columnCount = this.columns == null ? 0 : this.columns.size();
+        long usedMb = this.usedMemoryPredicted / 1024 / 1024;
+        long availMb = this.availableMemory / 1024 / 1024;
+        double memPercent = this.availableMemory == 0
+                ? 0
+                : (this.usedMemoryPredicted * 100.0) / this.availableMemory;
+
+        log.info(
+                "{} | Memory Usage: {}% ({}MB of {}MB) | Columns: {}, Unique values: {} | Avg value size: {} bytes",
+                prefix,
+                Math.round(memPercent * 10) / 10.0,
+                usedMb,
+                availMb,
+                columnCount,
+                this.valueCount,
+                Math.round(this.avgValueSizeInBytes * 100) / 100.0);
+
+        if (log.isDebugEnabled() && this.columns != null && !this.columns.isEmpty()) {
+            String attrs = this.columns.int2ObjectEntrySet().stream()
+                    .map(e -> e.getIntKey() + "=" + e.getValue().size())
+                    .collect(java.util.stream.Collectors.joining(", "));
+            log.debug("{} | Attribute unique values: [{}]", prefix, attrs);
+        }
     }
 
     /**
@@ -578,9 +643,9 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         boolean overloaded = this.usedMemoryPredicted >= this.availableMemory;
 
         // Answer with status
-        this.dependencyMiner.tell(new DependencyMiner.StatusMessage(this.dataProviderId, false, overloaded));
+        this.dependencyMiner.tell(new DependencyMiner.DataProviderStatusMessage(this.dataProviderId, false, overloaded));
 
-        this.getContext().getLog().info("DataProvider-{} Status: overloaded = {} ({} of {})", this.dataProviderId,
+        this.getContext().getLog().info("DataProvider-{} | Status: overloaded = {} ({} of {})", this.dataProviderId,
                 overloaded,
                 this.usedMemoryPredicted / 1024 / 1024,
                 this.availableMemory / 1024 / 1024);

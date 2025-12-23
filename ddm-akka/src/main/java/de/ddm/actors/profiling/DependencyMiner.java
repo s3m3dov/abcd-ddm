@@ -59,16 +59,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	@Getter
 	@NoArgsConstructor
 	@AllArgsConstructor
-	public static class StatusMessage implements Message {
-		private static final long serialVersionUID = -5302922080219823523L;
-		int dataProviderId;
-		boolean active;
-		boolean overloaded;
-	}
-
-	@Getter
-	@NoArgsConstructor
-	@AllArgsConstructor
 	public static class DataProviderRegistrationMessage implements Message {
 		private static final long serialVersionUID = -4025238529984914108L;
 		ActorRef<DataProvider.Message> dataProvider;
@@ -85,6 +75,36 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		ActorRef<DataProvider.Message> localDataProvider; // Co-located DataProvider
 	}
 
+    /**
+     * Status message from DataProvider indicating its current load state
+     */
+    @Getter
+	@NoArgsConstructor
+	@AllArgsConstructor
+	public static class DataProviderStatusMessage implements Message {
+		private static final long serialVersionUID = -5302922080219823523L;
+		int dataProviderId;
+		boolean active;
+		boolean overloaded;
+	}
+
+    /**
+	 * Message from DataProvider indicating it has completed validation phase
+	 * transition
+	 * (columns sorted, statistics built, Bloom filters ready)
+	 */
+	@Getter
+	@NoArgsConstructor
+	@AllArgsConstructor
+	public static class DataProviderReadyForValidationMessage implements Message {
+		private static final long serialVersionUID = -9988776655443322L;
+		int dataProviderId;
+	}
+
+    /**
+     * Message from DependencyWorker with results of validation tasks
+     * (lists of discovered INDs, pruning types, data fetch info)
+     */
 	@Getter
 	@NoArgsConstructor
 	@AllArgsConstructor
@@ -93,8 +113,12 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int[] lhss;
 		int[] rhss;
 		int workerId;
-		boolean usedPruning;
+		String lhsToRhsPruningType; // Pruning type for LHS→RHS direction
+		String rhsToLhsPruningType; // Pruning type for RHS→LHS direction
+		boolean lhsDataFetched; // Was LHS data fetched for this task?
+		boolean rhsDataFetched; // Was RHS data fetched for this task?
 	}
+
 
 	////////////////////////
 	// Actor Construction //
@@ -111,8 +135,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	private DependencyMiner(ActorContext<Message> context) {
 		super(context);
-		// this.discoverNaryDependencies =
-		// SystemConfigurationSingleton.get().isHardMode();
 		this.inputFiles = InputConfigurationSingleton.get().getInputFiles();
 		this.headerLines = new String[this.inputFiles.length][];
 
@@ -158,14 +180,15 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	private long startTime;
 
-	// private final boolean discoverNaryDependencies;
+    // Input tracking
 	private final File[] inputFiles;
 	private final String[][] headerLines;
-
 	private final List<ActorRef<InputReader.Message>> inputReaders;
 	private final BooleanList inputReaderFinished;
 
+    // Result collection
 	private final ActorRef<ResultCollector.Message> resultCollector;
+    // LargeMessageProxy for sending large messages
 	private final ActorRef<LargeMessageProxy.Message> largeMessageProxy;
 
 	// DataProvider tracking (one per worker node)
@@ -193,21 +216,35 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private final List<BatchMessage> pendingBatchMessages;
 	private final List<DependencyWorkerRegistrationMessage> pendingWorkerRegistrations;
 
+    // Rebalancing state
+	private IntSet rebalancingDataProviderIds = new IntOpenHashSet(); // IDs of DataProviders involved in rebalancing
+	private IntList awaitingDataProviderIds = new IntArrayList(); // IDs of DataProviders waiting for attributes
+
+	// Validation phase synchronization
+	private IntSet dataProvidersReadyForValidation = new IntOpenHashSet();
+	private boolean waitingForDataProvidersReady = false;
+
 	// Validation phase state
 	private Map<Integer, Queue<int[]>> workerTaskQueues; // Per-worker task queues for locality
 	private int totalINDsFound;
 	private int totalTasks;
 	private int completedTasks;
-	private int transitivitySkips = 0;
-	private int statisticSkips = 0;
-
-	// Transitivity pruning: Graph-based IND storage for transitivity checks
-	// Maps lhs -> set of rhs where lhs ⊆ rhs
+    // Transitivity discovery: Graph-based IND storage for transitivity checks
 	private Map<Integer, Set<Integer>> indGraph;
 
-	// Rebalancing state
-	private IntSet rebalancingDataProviderIds = new IntOpenHashSet(); // IDs of DataProviders involved in rebalancing
-	private IntList awaitingDataProviderIds = new IntArrayList(); // IDs of DataProviders waiting for attributes
+	// Pruning statistics by type (aggregated across all directions)
+	private Map<String, Integer> pruningCountsByType = new HashMap<>();
+	private int totalDirectionsPruned = 0; // Total number of directions pruned (not tasks)
+
+	// Data fetch tracking (actual fetches performed, accounting for caching)
+	private int totalLhsDataFetches = 0; // Total LHS data fetches
+	private int totalRhsDataFetches = 0; // Total RHS data fetches
+
+	// Task-level tracking: pruning-only vs data-fetch tasks
+	private int tasksFullyPruned = 0; // Tasks where both directions were pruned
+	private int tasksHalfPruned = 0; // Tasks where one direction was pruned, one required data
+
+
 
 	////////////////////
 	// Actor Behavior //
@@ -221,8 +258,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				.onMessage(BatchMessage.class, this::handle)
 				.onMessage(DataProviderRegistrationMessage.class, this::handle)
 				.onMessage(DependencyWorkerRegistrationMessage.class, this::handle)
-				.onMessage(StatusMessage.class, this::handle)
+				.onMessage(DataProviderStatusMessage.class, this::handle)
 				.onMessage(ResultMessage.class, this::handle)
+				.onMessage(DataProviderReadyForValidationMessage.class, this::handle)
 				.onSignal(Terminated.class, this::handle)
 				.build();
 	}
@@ -270,6 +308,8 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 			}
 		}
 
+		this.logAttributeMapping();
+
 		// Wait if no workers have registered yet
 		if (this.dataProviders.isEmpty())
 			return this;
@@ -300,10 +340,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				// Log the result of the data reading process
 				this.getContext().getLog().info("Reading data completed in {}ms",
 						System.currentTimeMillis() - this.startTime);
-				// Output current DependencyMiner information for debugging
-				this.outputDebugInformation();
-				// Send debug info to each DataProvider
-				this.requestDebugInfoFromDataProviders();
 
 				// Attempt to initiate the validation phase
 				this.initiateValidationPhase();
@@ -360,7 +396,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		return this;
 	}
 
-	private Behavior<Message> handle(StatusMessage message) {
+	private Behavior<Message> handle(DataProviderStatusMessage message) {
 		this.getContext().getLog().info("StatusMessage Received: {} Active DataProviders",
 				this.dataProvidersActive.stream().filter(b -> b).count());
 
@@ -467,8 +503,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	}
 
 	private Behavior<Message> handle(DependencyWorkerRegistrationMessage message) {
-		this.getContext().getLog().info("WorkerRegistrationMessage received");
-
 		ActorRef<DependencyWorker.Message> dependencyWorker = message.getDependencyWorker();
 		ActorRef<LargeMessageProxy.Message> dependencyWorkerLMP = message.getDependencyWorkerLMP();
 		ActorRef<DataProvider.Message> localDataProvider = message.getLocalDataProvider();
@@ -491,13 +525,45 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	private Behavior<Message> handle(ResultMessage message) {
 		this.completedTasks++;
-		if (message.isUsedPruning()) {
-			this.statisticSkips++;
+
+		// Track pruning types for each direction separately
+		String lhsToRhsType = message.getLhsToRhsPruningType();
+		String rhsToLhsType = message.getRhsToLhsPruningType();
+
+		// Count each direction that was pruned
+		if (lhsToRhsType != null && !"NONE".equals(lhsToRhsType)) {
+			this.pruningCountsByType.merge(lhsToRhsType, 1, Integer::sum);
+			this.totalDirectionsPruned++;
 		}
+		if (rhsToLhsType != null && !"NONE".equals(rhsToLhsType)) {
+			this.pruningCountsByType.merge(rhsToLhsType, 1, Integer::sum);
+			this.totalDirectionsPruned++;
+		}
+
+		// Track actual data fetches (accounting for caching)
+		if (message.isLhsDataFetched()) {
+			this.totalLhsDataFetches++;
+		}
+		if (message.isRhsDataFetched()) {
+			this.totalRhsDataFetches++;
+		}
+
+		// Track task-level pruning effectiveness
+		boolean lhsToRhsPruned = (lhsToRhsType != null && !"NONE".equals(lhsToRhsType));
+		boolean rhsToLhsPruned = (rhsToLhsType != null && !"NONE".equals(rhsToLhsType));
+		boolean bothDirectionsPruned = lhsToRhsPruned && rhsToLhsPruned;
+		boolean oneDirectionPruned = lhsToRhsPruned ^ rhsToLhsPruned; // XOR: exactly one pruned
+
+		if (bothDirectionsPruned) {
+			this.tasksFullyPruned++;
+		} else if (oneDirectionPruned) {
+			this.tasksHalfPruned++;
+		}
+
 		this.getContext().getLog().info(
-				"ResultMessage! {} INDs from DependencyWorker-{} ({} of {} tasks completed) - Pruned: {}",
+				"ResultMessage! {} INDs from DependencyWorker-{} ({} of {} tasks completed) | Pruned: LHS→RHS: {}, RHS→LHS: {} | Fetches: LHS={}, RHS={}",
 				message.getLhss().length, message.getWorkerId(), this.completedTasks, this.totalTasks,
-				message.isUsedPruning());
+				lhsToRhsType, rhsToLhsType, message.isLhsDataFetched(), message.isRhsDataFetched());
 
 		// Store discovered INDs in graph for transitivity pruning
 		for (int i = 0; i < message.getLhss().length; i++) {
@@ -532,6 +598,24 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private Behavior<Message> handle(Terminated signal) {
 		ActorRef<DependencyWorker.Message> dependencyWorker = signal.getRef().unsafeUpcast();
 		this.dependencyWorkers.remove(dependencyWorker);
+		return this;
+	}
+
+	private Behavior<Message> handle(DataProviderReadyForValidationMessage message) {
+		this.getContext().getLog().info("DataProvider-{} ready for validation phase",
+				message.getDataProviderId());
+
+		this.dataProvidersReadyForValidation.add(message.getDataProviderId());
+
+		// Check if all DataProviders are ready
+		if (this.waitingForDataProvidersReady &&
+				this.dataProvidersReadyForValidation.size() == this.dataProviders.size()) {
+			this.getContext().getLog().info("All {} DataProviders ready - starting validation tasks",
+					this.dataProviders.size());
+			this.waitingForDataProvidersReady = false;
+			this.startValidationTasks();
+		}
+
 		return this;
 	}
 
@@ -637,7 +721,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		for (int attribute = 0; attribute < numAttributes; attribute++)
 			this.attribute2dataProvider[attribute] = attribute % numDataProviders;
 
-		this.getContext().getLog().info("Mapped {} attributes to {} DataProviders",
+		this.getContext().getLog().debug("Mapped {} attributes to {} DataProviders",
 				numAttributes, numDataProviders);
 	}
 
@@ -659,6 +743,16 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 	}
 
+	private void logAttributeMapping() {
+		StringBuilder sb = new StringBuilder();
+		sb.append("Attribute Mapping:\n");
+		for (int i = 0; i < this.attribute2name.length; i++) {
+			sb.append(
+					String.format("  [%d] -> %s (%s)\n", i, this.attribute2name[i], this.attribute2file[i].getName()));
+		}
+		this.getContext().getLog().info(sb.toString());
+	}
+
 	// * REBALANCING * //
 	/**
 	 * Trigger rebalancing by redistributing attributes to new DataProviders.
@@ -674,34 +768,28 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				numAttributes, numDataProviders, targetAttributesPerDP);
 
 		// Calculate current distribution
-		int[] currentCounts = new int[numDataProviders];
+		int[] attributeCounts = new int[numDataProviders];
 		for (int attribute = 0; attribute < numAttributes; attribute++) {
-			currentCounts[this.attribute2dataProvider[attribute]]++;
+			attributeCounts[this.attribute2dataProvider[attribute]]++;
 		}
-
-		// Log BEFORE state
-		logAttributeDistribution("BEFORE rebalancing", currentCounts);
+		logAttributeDistribution("BEFORE Rebalancing", attributeCounts);
 
 		// Check if any DataProviders are overloaded
 		boolean hasOverloaded = this.dataProvidersOverloaded.stream().anyMatch(b -> b);
 
 		if (hasOverloaded) {
 			// Use overload-priority strategy
-			this.getContext().getLog().info("Using overload-priority rebalancing strategy");
-			rebalanceWithOverloadPriority(numDataProviders, targetAttributesPerDP, currentCounts);
+			this.getContext().getLog().info("Rebalancing strategy: overload-priority");
+			rebalanceWithOverloadPriority(numDataProviders, targetAttributesPerDP, attributeCounts);
 		} else {
 			// Use batch-wise (even distribution) strategy
-			this.getContext().getLog().info("Using batch-wise rebalancing strategy");
-			rebalanceBatchWise(numDataProviders, targetAttributesPerDP, currentCounts);
+			this.getContext().getLog().info("Rebalancing strategy: batch-wise");
+			rebalanceBatchWise(numDataProviders, targetAttributesPerDP, attributeCounts);
 		}
 
-		// Clear awaiting list
 		this.awaitingDataProviderIds.clear();
-
-		// Log AFTER state
-		logAttributeDistribution("AFTER rebalancing", currentCounts);
-
-		this.getContext().getLog().info("Rebalancing in progress, batches delayed");
+		logAttributeDistribution("AFTER Rebalancing", attributeCounts);
+		this.getContext().getLog().info("Rebalancing in progress — batch processing paused");
 	}
 
 	/**
@@ -891,26 +979,73 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	 * DataProvider.
 	 */
 	private void logAttributeDistribution(String label, int[] attributeCounts) {
-		StringBuilder summary = new StringBuilder(label + " - Counts: ");
-		for (int dpId = 0; dpId < attributeCounts.length; dpId++) {
-			summary.append("DP-").append(dpId).append(": ").append(attributeCounts[dpId]);
-			if (dpId < attributeCounts.length - 1) {
-				summary.append(", ");
-			}
-		}
-		this.getContext().getLog().info(summary.toString());
+		var log = this.getContext().getLog();
 
-		// Log detailed attribute IDs for each DataProvider
-		for (int dpId = 0; dpId < this.dataProviders.size(); dpId++) {
-			IntList attributeIds = new IntArrayList();
-			for (int attribute = 0; attribute < this.attribute2dataProvider.length; attribute++) {
-				if (this.attribute2dataProvider[attribute] == dpId) {
-					attributeIds.add(attribute);
-				}
-			}
-			this.getContext().getLog().info("{} - DataProvider-{}: {} attributes -> {}",
-					label, dpId, attributeIds.size(), attributeIds);
+		StringBuilder sb = new StringBuilder(label).append(" | AttributeCounts: ");
+		for (int i = 0; i < attributeCounts.length; i++) {
+			if (i > 0)
+				sb.append(", ");
+			sb.append("DP-").append(i).append(": ").append(attributeCounts[i]);
 		}
+		log.info(sb.toString());
+
+		if (log.isDebugEnabled()) {
+			for (int dpId = 0; dpId < this.dataProviders.size(); dpId++) {
+				IntList attributeIds = new IntArrayList();
+				for (int attr = 0; attr < this.attribute2dataProvider.length; attr++) {
+					if (this.attribute2dataProvider[attr] == dpId) {
+						attributeIds.add(attr);
+					}
+				}
+
+				log.debug(
+						"{} | DataProvider-{} | Attributes: {} -> {}",
+						label,
+						dpId,
+						attributeIds.size(),
+						attributeIds);
+			}
+		}
+	}
+
+	/**
+	 * Log validation phase final results including tasks executed, pruning
+	 * statistics, and INDs found
+	 */
+	private void logValidationInfo(long discoveryTime) {
+		var log = this.getContext().getLog();
+		log.info("Total INDs: {} | Time: {}ms | Workers: {}",
+				this.totalINDsFound,
+				discoveryTime,
+				this.dependencyWorkers.size());
+
+		// ===== TASKS =====
+		log.info("Total tasks: {} (completed: {})", this.totalTasks, this.completedTasks);
+		log.info("  - Fully-pruned (both directions): {}", this.tasksFullyPruned);
+		log.info("  - Half-pruned (one direction): {}", this.tasksHalfPruned);
+		log.info("  - No-pruning (both directions validated): {}",
+				this.totalTasks - this.tasksFullyPruned - this.tasksHalfPruned);
+
+		// ===== DIRECTIONS =====
+		int totalDirections = this.totalTasks * 2;
+		int totalPrunedDirections = this.totalDirectionsPruned;
+		int totalValidatedDirections = totalDirections - totalPrunedDirections;
+		double pruningPercentage = (totalPrunedDirections * 100.0) / totalDirections;
+		// Log pruning breakdown
+		log.info("Pruning rate: {}% ({} of {} directions pruned)",
+				String.format("%.2f", pruningPercentage),
+				totalPrunedDirections, totalDirections);
+		if (!this.pruningCountsByType.isEmpty()) {
+			for (Map.Entry<String, Integer> entry : this.pruningCountsByType.entrySet()) {
+				log.info("  - {}-based: {} directions", entry.getKey(), entry.getValue());
+			}
+		}
+		log.info("  - NONE (not prunable): {} directions", totalValidatedDirections);
+
+		// ===== DATA FETCHES =====
+		int totalFetches = this.totalLhsDataFetches + this.totalRhsDataFetches;
+		log.info("Total data fetches: {} (LHS: {}, RHS: {})", totalFetches, this.totalLhsDataFetches,
+				this.totalRhsDataFetches);
 	}
 
 	// * VALIDATION PHASE * //
@@ -922,11 +1057,19 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		if (this.dataProvidersActive.stream().anyMatch(b -> b))
 			return;
 
+		// Prevent re-entry if already waiting for DataProviders
+		if (this.waitingForDataProvidersReady)
+			return;
+
 		this.getContext().getLog().info("Initiating validation phase with {} attributes and {} workers",
 				numAttributes, numWorkers);
 
-		// Tell all DataProviders to transition to validation phase (sort columns and
-		// free memory)
+		// Initialize ready tracking
+		this.dataProvidersReadyForValidation.clear();
+		this.waitingForDataProvidersReady = true;
+
+		// Tell all DataProviders to transition to validation phase
+		// (sort columns and free memory)
 		this.getContext().getLog().info("Instructing all DataProviders to transition to validation phase");
 		for (ActorRef<DataProvider.Message> dataProvider : this.dataProviders) {
 			dataProvider.tell(new DataProvider.TransitionToValidationPhaseMessage());
@@ -955,10 +1098,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				continue;
 			}
 
-			// Assign ALL tasks for this LHS attribute to a single worker (round-robin by
-			// LHS)
-			// This ensures the worker loads the LHS once and validates against all RHS
-			// attributes
+			// Assign ALL tasks for this LHS attribute to a single worker
+			// (round-robin by LHS), which ensures the worker loads the LHS once
+			// and validates against all RHS attributes
 			int targetWorkerId = colocatedWorkers.get(lhsAttr % colocatedWorkers.size());
 
 			for (int rhsAttr = 0; rhsAttr < numAttributes; rhsAttr++) {
@@ -973,17 +1115,28 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 		this.totalTasks = totalTasksGenerated;
 		this.completedTasks = 0;
-		this.transitivitySkips = 0;
 		this.totalINDsFound = 0;
+		this.totalDirectionsPruned = 0;
+		this.pruningCountsByType.clear();
+		this.tasksFullyPruned = 0;
+		this.tasksHalfPruned = 0;
+		this.totalLhsDataFetches = 0;
+		this.totalRhsDataFetches = 0;
 
-		this.getContext().getLog().info("Generated {} validation tasks distributed across {} DependencyWorkers",
+		// Wait for ValidationPhaseReadyMessage from all DataProviders
+		this.getContext().getLog().info("Waiting for {} DataProviders to complete validation phase transition",
+				this.dataProviders.size());
+	}
+
+	/**
+	 * Start assigning validation tasks to workers.
+	 * Called after all DataProviders have confirmed they're ready.
+	 */
+	private void startValidationTasks() {
+		int numWorkers = this.dependencyWorkers.size();
+
+		this.getContext().getLog().info("Starting validation with {} tasks across {} workers",
 				this.totalTasks, numWorkers);
-
-		// Log task distribution
-		for (int workerId = 0; workerId < numWorkers; workerId++) {
-			int taskCount = this.workerTaskQueues.get(workerId).size();
-			this.getContext().getLog().info("DependencyWorker-{} has assigned {} tasks", workerId, taskCount);
-		}
 
 		// Assign initial task to each worker
 		for (int workerId = 0; workerId < numWorkers; workerId++) {
@@ -1010,25 +1163,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				if (this.completedTasks > 0 || this.totalTasks == 0) {
 					this.resultCollector.tell(new ResultCollector.FinalizeMessage());
 					long discoveryTime = System.currentTimeMillis() - this.startTime;
-					// Log mining completion
 					this.getContext().getLog().info("Finished mining within {} ms!", discoveryTime);
-                    // Log pruning statistics
-                    if (this.totalTasks > 0) {
-                        int totalSkips = this.transitivitySkips + this.statisticSkips;
-                        int fullDataTasks = this.totalTasks - totalSkips;
-                        double pruningPercentage = (totalSkips * 100.0) / this.totalTasks;
-
-                        this.getContext().getLog().info(
-                                "Pruned {} tasks out of {} ({}%): statistics - {}, transitivity - {}, full data - {}",
-                                totalSkips,
-                                this.totalTasks,
-                                String.format("%.2f", pruningPercentage),
-                                this.statisticSkips,
-                                this.transitivitySkips,
-                                fullDataTasks);
-                    }
-					// Log total INDs found
-					this.getContext().getLog().info("Total Inclusion Dependencies found: {}", this.totalINDsFound);
+					// Log validation results
+					logValidationInfo(discoveryTime);
 				} else {
 					this.getContext().getLog().debug(
 							"All workers inactive but no tasks completed yet - waiting for task processing to begin");
@@ -1042,41 +1179,15 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int lhsAttr = task[0];
 		int rhsAttr = task[1];
 
-		// Check if this task can be pruned via bidirectional transitivity
-		if (canPruneByTransitivity(lhsAttr, rhsAttr)) {
-			this.transitivitySkips++;
-			this.completedTasks++; // Count as completed to maintain progress tracking
+		// Check each direction for transitivity separately
+		boolean lhsToRhsTransitive = canPruneDirection(lhsAttr, rhsAttr);
+		boolean rhsToLhsTransitive = canPruneDirection(rhsAttr, lhsAttr);
 
-			// Since we only prune when BOTH directions can be inferred,
-			// we need to add both directions to the graph and report both INDs
-
-			// Add both directions to graph for future transitivity checks
-			this.indGraph.computeIfAbsent(lhsAttr, k -> new HashSet<>()).add(rhsAttr);
-			this.indGraph.computeIfAbsent(rhsAttr, k -> new HashSet<>()).add(lhsAttr);
-
-			// Create and report both INDs (we know both are valid through transitivity)
-			List<InclusionDependency> inds = new ArrayList<>();
-
-			// IND 1: lhs ⊆ rhs
-			inds.add(new InclusionDependency(
-					this.attribute2file[lhsAttr], new String[] { this.attribute2name[lhsAttr] },
-					this.attribute2file[rhsAttr], new String[] { this.attribute2name[rhsAttr] }));
-
-			// IND 2: rhs ⊆ lhs
-			inds.add(new InclusionDependency(
-					this.attribute2file[rhsAttr], new String[] { this.attribute2name[rhsAttr] },
-					this.attribute2file[lhsAttr], new String[] { this.attribute2name[lhsAttr] }));
-
-			this.totalINDsFound += 2;
-			this.resultCollector.tell(new ResultCollector.ResultMessage(inds));
-
+		// Log transitivity hints if present
+		if (lhsToRhsTransitive || rhsToLhsTransitive) {
 			this.getContext().getLog().debug(
-					"Pruned task ({} ⊆ {}? AND {} ⊆ {}?) via bidirectional transitivity - both INDs reported",
-					lhsAttr, rhsAttr, rhsAttr, lhsAttr);
-
-			// Recursively assign next task
-			this.assignNextValidationTask(dependencyWorkerId);
-			return;
+					"Task ({} ⊆ {}?) has transitivity: LHS→RHS={}, RHS→LHS={} - sending with hints",
+					lhsAttr, rhsAttr, lhsToRhsTransitive, rhsToLhsTransitive);
 		}
 
 		// Verify locality (LHS should be local to this worker's DataProvider)
@@ -1093,35 +1204,14 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		int rhsDataProviderId = this.attribute2dataProvider[rhsAttr];
 		ActorRef<DataProvider.Message> rhsDataProvider = this.dataProviders.get(rhsDataProviderId);
 
-		// Send task to worker
+		// Send task to worker with transitivity hints
 		this.dependencyWorkers.get(dependencyWorkerId)
-				.tell(new DependencyWorker.ValidateTaskMessage(lhsAttr, rhsAttr, rhsDataProvider));
+				.tell(new DependencyWorker.ValidateTaskMessage(lhsAttr, rhsAttr, rhsDataProvider,
+						lhsToRhsTransitive, rhsToLhsTransitive));
 		this.dependencyWorkersActive.set(dependencyWorkerId, true);
 
 		this.getContext().getLog().debug("Assigned task ({} ⊆ {}?) to DependencyWorker-{} (local LHS)", lhsAttr,
 				rhsAttr, dependencyWorkerId);
-	}
-
-	/**
-	 * Check if a task can be pruned via bidirectional transitivity pruning.
-	 * Since DependencyWorker checks both directions (lhs ⊆ rhs AND rhs ⊆ lhs),
-	 * we can only prune the entire task if BOTH directions can be inferred via
-	 * transitivity.
-	 * 
-	 * @param lhsAttr First attribute in the task
-	 * @param rhsAttr Second attribute in the task
-	 * @return true if both lhs ⊆ rhs AND rhs ⊆ lhs can be inferred via transitivity
-	 */
-	private boolean canPruneByTransitivity(int lhsAttr, int rhsAttr) {
-		// Check if lhs ⊆ rhs can be pruned
-		boolean canPruneLhsToRhs = canPruneDirection(lhsAttr, rhsAttr);
-
-		// Check if rhs ⊆ lhs can be pruned
-		boolean canPruneRhsToLhs = canPruneDirection(rhsAttr, lhsAttr);
-
-		// Only prune the entire task if BOTH directions can be pruned
-		// This ensures we don't skip validation when one direction is still unknown
-		return canPruneLhsToRhs && canPruneRhsToLhs;
 	}
 
 	/**
@@ -1147,90 +1237,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		}
 
 		return false;
-	}
-
-	// * DEBUG OUTPUT * //
-	/**
-	 * Output comprehensive debug information about DependencyMiner's current state
-	 */
-	private void outputDebugInformation() {
-		this.getContext().getLog().info("========== DEPENDENCY MINER DEBUG INFORMATION ==========");
-
-		// Log file and attribute information
-		this.getContext().getLog().info("Input Files: {}", Arrays.toString(this.inputFiles));
-		this.getContext().getLog().info("Total Attributes: {}",
-				this.attribute2name != null ? this.attribute2name.length : 0);
-
-		// Log attribute details
-		if (this.attribute2name != null) {
-			for (int i = 0; i < this.attribute2name.length; i++) {
-				this.getContext().getLog().info("  Attribute {}: {} from file {}",
-						i, this.attribute2name[i], this.attribute2file[i].getName());
-			}
-		}
-
-		// Log DataProvider information
-		this.getContext().getLog().info("Total DataProviders: {}", this.dataProviders.size());
-		for (int dpId = 0; dpId < this.dataProviders.size(); dpId++) {
-			IntList attributeIds = new IntArrayList();
-			if (this.attribute2dataProvider != null) {
-				for (int attribute = 0; attribute < this.attribute2dataProvider.length; attribute++) {
-					if (this.attribute2dataProvider[attribute] == dpId) {
-						attributeIds.add(attribute);
-					}
-				}
-			}
-			this.getContext().getLog().info("  DataProvider-{}: {} attributes -> {}",
-					dpId, attributeIds.size(), attributeIds);
-		}
-
-		// Log DependencyWorker information
-		this.getContext().getLog().info("Total DependencyWorkers: {}", this.dependencyWorkers.size());
-		for (int workerId = 0; workerId < this.dependencyWorkers.size(); workerId++) {
-			Integer localDataProviderId = this.worker2dataProvider.get(workerId);
-			this.getContext().getLog().info("DependencyWorker-{}: co-located with DataProvider-{}",
-					workerId, localDataProviderId);
-		}
-
-		// Log co-location mapping
-		this.getContext().getLog().info("DataProvider to Workers co-location mapping:");
-		for (Map.Entry<Integer, List<Integer>> entry : this.dataProvider2workers.entrySet()) {
-			this.getContext().getLog().info("  DataProvider-{} -> DependencyWorkers: {}",
-					entry.getKey(), entry.getValue());
-		}
-
-		this.getContext().getLog().info("======================================================");
-	}
-
-	/**
-	 * Send debug information to each DataProvider
-	 */
-	private void requestDebugInfoFromDataProviders() {
-		this.getContext().getLog().info("Sending debug information to all DataProviders...");
-
-		for (int dpId = 0; dpId < this.dataProviders.size(); dpId++) {
-			// Collect attributes for this DataProvider
-			IntList attributeIds = new IntArrayList();
-			List<String> attributeNames = new ArrayList<>();
-
-			if (this.attribute2dataProvider != null) {
-				for (int attribute = 0; attribute < this.attribute2dataProvider.length; attribute++) {
-					if (this.attribute2dataProvider[attribute] == dpId) {
-						attributeIds.add(attribute);
-						attributeNames.add(this.attribute2name[attribute]);
-					}
-				}
-			}
-
-			// Send debug message
-			DataProvider.DataInfoDebugMessage debugMsg = new DataProvider.DataInfoDebugMessage(
-					dpId,
-					attributeIds.toIntArray(),
-					attributeNames.toArray(new String[0]));
-
-			this.dataProviders.get(dpId).tell(debugMsg);
-			this.getContext().getLog().info("Sent debug info to DataProvider-{}", dpId);
-		}
 	}
 
 }
