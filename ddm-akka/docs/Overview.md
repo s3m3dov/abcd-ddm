@@ -6,13 +6,13 @@ This document provides a comprehensive overview of the `ddm-akka` project, cover
 
 1. [Architecture Overview](#architecture-overview)
 2. [Application Flow & Messages](#application-flow--messages)
-    - [Phase 1: Initialization & Registration](#phase-1-initialization--registration)
-    - [Phase 2: Loading Phase](#phase-2-loading-phase)
+    - [Phase 1: Cluster Discovery & Actor Recruitment](#phase-1-cluster-discovery--actor-recruitment)
+    - [Phase 2: Data Distribution (Loading Phase)](#phase-2-data-distribution-loading-phase)
     - [Phase 3: Transition Phase](#phase-3-transition-phase)
     - [Phase 4: Validation Phase](#phase-4-validation-phase)
 3. [Important Logic & Decisions](#important-logic--decisions)
 4. [Completed Work & Features](#completed-work--features)
-5. [Performance Optimizations](#performance-optimizations)
+5. [Summary of Performance Optimizations](#summary-of-performance-optimizations)
 
 ---
 
@@ -53,39 +53,87 @@ graph TD
 
 The discovery process is divided into several distinct phases, each with specific actor interactions.
 
-### Phase 1: Initialization & Registration
+### Phase 1: Cluster Discovery & Actor Recruitment
 
-In this phase, the cluster nodes start up and workers register themselves with the master to join the discovery pool.
+The system uses a dynamic discovery mechanism via the Akka Receptionist to coordinate between the Master and Worker nodes.
 
 ```mermaid
-graph LR
-    Receptionist["Akka Receptionist"]
-    Miner["DependencyMiner"]
-    Worker["Worker Role Node"]
+graph TD
+    %% Nodes
+    Master(("Master"))
+    DM(("DependencyMiner"))
+    IR(("InputReader<br/>(per file)"))
+    RC(("ResultCollector"))
+    R(("Receptionist"))
+    Worker(("Worker"))
+    DP(("DataProvider"))
+    DW(("DependencyWorker<br/>(n)"))
 
-    Worker -- "1. Subscribe" --> Receptionist
-    Receptionist -- "2. Provide Miner Ref" --> Worker
-    Worker -- "3. Register (Worker + DP)" --> Miner
-    Miner -- "4. Assign IDs" --> Worker
+    %% Spawning Logic
+    Master -- Spawn --> DM
+    DM -- Spawn --> IR
+    DM -- Spawn --> RC
+    Worker -- Spawn --> DP
+    Worker -- Spawn --> DW
+
+    %% References & Communication
+    DW -. "Has Reference To" .-> DP
+    DM -. "Register to Receptionist" .-> R
+    
+    DW -. "Sends RegisterMessage to Miner via Receptionist" .-> R
+    DP -. "Sends StatusMessage to Miner via Receptionist" .-> R
+    R -.-> DM
+
+    %% Styles
+    classDef master fill:#E6E0FF,stroke:#B3A1FF,stroke-width:2px;
+    classDef miner fill:#C1F2D0,stroke:#85E0A3,stroke-width:2px;
+    classDef component fill:#CCE0FF,stroke:#99C2FF,stroke-width:2px;
+    classDef receptionist fill:#E6E6E6,stroke:#CCCCCC,stroke-width:2px;
+
+    class Master,Worker master;
+    class DM miner;
+    class IR,RC,DP,DW component;
+    class R receptionist;
 ```
 
-### Phase 2: Loading Phase
+1. **Actor Startup**:
+    - The **Master** node role spawns the `DependencyMiner`.
+    - `DependencyMiner` immediately spawns the `InputReader`s and the `ResultCollector`.
+    - The **Worker** node role spawns one `DataProvider` and multiple `DependencyWorker`s (if `-w > 0`).
+2. **Discovery**:
+    - `DependencyMiner` registers itself with the `Receptionist`.
+    - `DataProvider` and `DependencyWorker` use the `Receptionist` to find and communicate with the `DependencyMiner`.
+3. **Registration**:
+    - Workers send their registration and status messages to the Miner to join the cluster's active resource pool.
 
-Data is read from CSV files and distributed across the available `DataProvider` actors to distribute memory load.
+### Phase 2: Data Distribution (Loading Phase)
+
+The `DependencyMiner` coordinates the movement of data from the source files to the distributed `DataProvider` memory.
 
 ```mermaid
 sequenceDiagram
     participant IR as InputReader
     participant DM as DependencyMiner
-    participant DP1 as DataProvider 1 (Local)
-    participant DP2 as DataProvider 2 (Remote)
+    participant DP1 as DataProvider A
+    participant DP2 as DataProvider B
 
     IR->>DM: HeaderMessage (Schema)
-    Note over DM: Map Attributes to DPs
-    IR->>DM: BatchMessage (Data Rows)
-    DM->>DP1: DataMessage (Attributes 0, 2, 4)
-    DM->>DP2: DataMessage (Attributes 1, 3, 5)
-    Note over DM, DP2: Rebalancing triggers if any DP is Overloaded
+    Note over DM: Round-Robin Attribute Mapping
+    IR->>DM: BatchMessage (CSV Rows)
+    
+    par Stream to DP A
+        DM->>DP1: DataMessage (Attr 0, 2, 4)
+    and Stream to DP B
+        DM->>DP2: DataMessage (Attr 1, 3, 5)
+    end
+
+    Note over DP1, DP2: Memory Status Reporting
+    
+    opt If DP A Overloaded
+        DM->>DP1: MoveDataMessage (Attr 4)
+        DP1->>DP2: AcceptDataMessage
+        Note over DM: Update Mapping
+    end
 ```
 
 ### Phase 3: Transition Phase
@@ -155,7 +203,6 @@ To minimize expensive data transfers and comparisons, the system employs several
 
 ---
 
-
 ## Completed Work & Features
 
 - [x] **Distributed Akka Cluster**: Support for multi-process and multi-machine execution.
@@ -165,7 +212,6 @@ To minimize expensive data transfers and comparisons, the system employs several
 - [x] **LHS Data Caching**: `DependencyWorker` caches the most recently used LHS column to speed up batch validations.
 - [x] **Large Message Support**: Seamless transfer of large datasets via proxy pattern.
 - [x] **Custom Bloom Filter**: Memory-optimized implementation with adjustable false-positive rates.
-
 
 ## Summary of Performance Optimizations
 
@@ -177,6 +223,4 @@ To minimize expensive data transfers and comparisons, the system employs several
 | **Memory Monitoring** | High | Prevents JVM crashes on memory-constrained nodes (e.g., Pi cluster). |
 | **LHS Caching** | Medium | Speeds up validation when multiple RHS attributes are checked against the same LHS. |
 
-
 ---
-
