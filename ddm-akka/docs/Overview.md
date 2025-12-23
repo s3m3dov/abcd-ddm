@@ -85,10 +85,10 @@ graph TD
     R -.-> DM
 
     %% Styles
-    classDef master fill:#E6E0FF,stroke:#B3A1FF,stroke-width:2px;
-    classDef miner fill:#C1F2D0,stroke:#85E0A3,stroke-width:2px;
-    classDef component fill:#CCE0FF,stroke:#99C2FF,stroke-width:2px;
-    classDef receptionist fill:#E6E6E6,stroke:#CCCCCC,stroke-width:2px;
+    classDef master fill:#E6E0FF,stroke:#B3A1FF,stroke-width:2px,color:#333;
+    classDef miner fill:#C1F2D0,stroke:#85E0A3,stroke-width:2px,color:#333;
+    classDef component fill:#CCE0FF,stroke:#99C2FF,stroke-width:2px,color:#333;
+    classDef receptionist fill:#F2F2F2,stroke:#CCCCCC,stroke-width:2px,color:#333;
 
     class Master,Worker master;
     class DM miner;
