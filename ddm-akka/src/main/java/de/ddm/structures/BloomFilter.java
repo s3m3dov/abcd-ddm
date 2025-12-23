@@ -1,5 +1,7 @@
 package de.ddm.structures;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import de.ddm.serialization.AkkaSerializable;
 import java.util.BitSet;
 
@@ -19,6 +21,7 @@ import java.util.BitSet;
 public class BloomFilter implements AkkaSerializable {
     private static final long serialVersionUID = 1234567890123456789L;
 
+    @JsonProperty("bitSet")
     private final BitSet bitSet;
     private final int bitSetSize;
     private final int numHashFunctions;
@@ -44,6 +47,26 @@ public class BloomFilter implements AkkaSerializable {
         this.bitSetSize = optimalBitSetSize(expectedElements, falsePositiveRate);
         this.numHashFunctions = optimalNumHashFunctions(expectedElements, bitSetSize);
         this.bitSet = new BitSet(bitSetSize);
+    }
+
+    /**
+     * Constructor for Jackson deserialization
+     * 
+     * @param bitSet           The bit set
+     * @param bitSetSize       The size of the bit set
+     * @param numHashFunctions The number of hash functions
+     * @param expectedElements The expected number of elements
+     */
+    @JsonCreator
+    public BloomFilter(
+            @JsonProperty("bitSet") BitSet bitSet,
+            @JsonProperty("bitSetSize") int bitSetSize,
+            @JsonProperty("numHashFunctions") int numHashFunctions,
+            @JsonProperty("expectedElements") int expectedElements) {
+        this.bitSet = bitSet;
+        this.bitSetSize = bitSetSize;
+        this.numHashFunctions = numHashFunctions;
+        this.expectedElements = expectedElements;
     }
 
     /**
