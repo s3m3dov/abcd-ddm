@@ -59,16 +59,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	@Getter
 	@NoArgsConstructor
 	@AllArgsConstructor
-	public static class StatusMessage implements Message {
-		private static final long serialVersionUID = -5302922080219823523L;
-		int dataProviderId;
-		boolean active;
-		boolean overloaded;
-	}
-
-	@Getter
-	@NoArgsConstructor
-	@AllArgsConstructor
 	public static class DataProviderRegistrationMessage implements Message {
 		private static final long serialVersionUID = -4025238529984914108L;
 		ActorRef<DataProvider.Message> dataProvider;
@@ -85,6 +75,36 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		ActorRef<DataProvider.Message> localDataProvider; // Co-located DataProvider
 	}
 
+    /**
+     * Status message from DataProvider indicating its current load state
+     */
+    @Getter
+	@NoArgsConstructor
+	@AllArgsConstructor
+	public static class DataProviderStatusMessage implements Message {
+		private static final long serialVersionUID = -5302922080219823523L;
+		int dataProviderId;
+		boolean active;
+		boolean overloaded;
+	}
+
+    /**
+	 * Message from DataProvider indicating it has completed validation phase
+	 * transition
+	 * (columns sorted, statistics built, Bloom filters ready)
+	 */
+	@Getter
+	@NoArgsConstructor
+	@AllArgsConstructor
+	public static class DataProviderReadyForValidationMessage implements Message {
+		private static final long serialVersionUID = -9988776655443322L;
+		int dataProviderId;
+	}
+
+    /**
+     * Message from DependencyWorker with results of validation tasks
+     * (lists of discovered INDs, pruning types, data fetch info)
+     */
 	@Getter
 	@NoArgsConstructor
 	@AllArgsConstructor
@@ -99,18 +119,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		boolean rhsDataFetched; // Was RHS data fetched for this task?
 	}
 
-	/**
-	 * Message from DataProvider indicating it has completed validation phase
-	 * transition
-	 * (columns sorted, statistics built, Bloom filters ready)
-	 */
-	@Getter
-	@NoArgsConstructor
-	@AllArgsConstructor
-	public static class ValidationPhaseReadyMessage implements Message {
-		private static final long serialVersionUID = -9988776655443322L;
-		int dataProviderId;
-	}
 
 	////////////////////////
 	// Actor Construction //
@@ -127,8 +135,6 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	private DependencyMiner(ActorContext<Message> context) {
 		super(context);
-		// this.discoverNaryDependencies =
-		// SystemConfigurationSingleton.get().isHardMode();
 		this.inputFiles = InputConfigurationSingleton.get().getInputFiles();
 		this.headerLines = new String[this.inputFiles.length][];
 
@@ -174,14 +180,15 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 
 	private long startTime;
 
-	// private final boolean discoverNaryDependencies;
+    // Input tracking
 	private final File[] inputFiles;
 	private final String[][] headerLines;
-
 	private final List<ActorRef<InputReader.Message>> inputReaders;
 	private final BooleanList inputReaderFinished;
 
+    // Result collection
 	private final ActorRef<ResultCollector.Message> resultCollector;
+    // LargeMessageProxy for sending large messages
 	private final ActorRef<LargeMessageProxy.Message> largeMessageProxy;
 
 	// DataProvider tracking (one per worker node)
@@ -209,11 +216,21 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private final List<BatchMessage> pendingBatchMessages;
 	private final List<DependencyWorkerRegistrationMessage> pendingWorkerRegistrations;
 
+    // Rebalancing state
+	private IntSet rebalancingDataProviderIds = new IntOpenHashSet(); // IDs of DataProviders involved in rebalancing
+	private IntList awaitingDataProviderIds = new IntArrayList(); // IDs of DataProviders waiting for attributes
+
+	// Validation phase synchronization
+	private IntSet dataProvidersReadyForValidation = new IntOpenHashSet();
+	private boolean waitingForDataProvidersReady = false;
+
 	// Validation phase state
 	private Map<Integer, Queue<int[]>> workerTaskQueues; // Per-worker task queues for locality
 	private int totalINDsFound;
 	private int totalTasks;
 	private int completedTasks;
+    // Transitivity discovery: Graph-based IND storage for transitivity checks
+	private Map<Integer, Set<Integer>> indGraph;
 
 	// Pruning statistics by type (aggregated across all directions)
 	private Map<String, Integer> pruningCountsByType = new HashMap<>();
@@ -227,16 +244,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 	private int tasksFullyPruned = 0; // Tasks where both directions were pruned
 	private int tasksHalfPruned = 0; // Tasks where one direction was pruned, one required data
 
-	// Transitivity discovery: Graph-based IND storage for transitivity checks
-	private Map<Integer, Set<Integer>> indGraph;
 
-	// Rebalancing state
-	private IntSet rebalancingDataProviderIds = new IntOpenHashSet(); // IDs of DataProviders involved in rebalancing
-	private IntList awaitingDataProviderIds = new IntArrayList(); // IDs of DataProviders waiting for attributes
-
-	// Validation phase synchronization
-	private IntSet dataProvidersReadyForValidation = new IntOpenHashSet();
-	private boolean waitingForDataProvidersReady = false;
 
 	////////////////////
 	// Actor Behavior //
@@ -250,9 +258,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 				.onMessage(BatchMessage.class, this::handle)
 				.onMessage(DataProviderRegistrationMessage.class, this::handle)
 				.onMessage(DependencyWorkerRegistrationMessage.class, this::handle)
-				.onMessage(StatusMessage.class, this::handle)
+				.onMessage(DataProviderStatusMessage.class, this::handle)
 				.onMessage(ResultMessage.class, this::handle)
-				.onMessage(ValidationPhaseReadyMessage.class, this::handle)
+				.onMessage(DataProviderReadyForValidationMessage.class, this::handle)
 				.onSignal(Terminated.class, this::handle)
 				.build();
 	}
@@ -388,7 +396,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		return this;
 	}
 
-	private Behavior<Message> handle(StatusMessage message) {
+	private Behavior<Message> handle(DataProviderStatusMessage message) {
 		this.getContext().getLog().info("StatusMessage Received: {} Active DataProviders",
 				this.dataProvidersActive.stream().filter(b -> b).count());
 
@@ -593,7 +601,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
 		return this;
 	}
 
-	private Behavior<Message> handle(ValidationPhaseReadyMessage message) {
+	private Behavior<Message> handle(DataProviderReadyForValidationMessage message) {
 		this.getContext().getLog().info("DataProvider-{} ready for validation phase",
 				message.getDataProviderId());
 

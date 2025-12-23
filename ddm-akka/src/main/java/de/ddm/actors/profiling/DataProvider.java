@@ -33,6 +33,21 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     public interface Message extends LargeMessageProxy.LargeMessage {
     }
 
+    /**
+     * Message from Receptionist with DependencyMiner service listing
+     */
+    @Getter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class ReceptionistListingMessage implements Message {
+        private static final long serialVersionUID = -8234567890123456789L;
+        Receptionist.Listing listing;
+    }
+
+    /**
+     * Message to deliver a batch of column data for a specific attribute
+     * to the DataProvider during the loading phase
+     */
     @Getter
     @NoArgsConstructor
     @AllArgsConstructor
@@ -43,6 +58,10 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         int expectedBatchCount;
     }
 
+    /**
+     * Message to move specified columns to another DataProvider
+     * in a rebalancing operation
+     */
     @Getter
     @NoArgsConstructor
     @AllArgsConstructor
@@ -55,6 +74,10 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         int expectedMoveCount;
     }
 
+    /**
+     * Message to accept incoming columns from another DataProvider
+     * in a rebalancing operation
+     */
     @Getter
     @NoArgsConstructor
     @AllArgsConstructor
@@ -64,30 +87,6 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         int totalExpectedMoves;
         int fromDataProviderId;
         double avgValueSizeInBytes; // Memory metric from source DataProvider
-    }
-
-    /**
-     * Message to request column data for a specific attribute
-     */
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class RequestColumnMessage implements Message {
-        private static final long serialVersionUID = -3571780705578600223L;
-        int attributeId;
-        ActorRef<DependencyWorker.Message> replyTo;
-        ActorRef<LargeMessageProxy.Message> replyToLMP;
-    }
-
-    /**
-     * Message from Receptionist with DependencyMiner service listing
-     */
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class ReceptionistListingMessage implements Message {
-        private static final long serialVersionUID = -8234567890123456789L;
-        Receptionist.Listing listing;
     }
 
     /**
@@ -142,6 +141,19 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     @AllArgsConstructor
     public static class RequestBloomFilterMessage implements Message {
         private static final long serialVersionUID = 778899001122334456L;
+        int attributeId;
+        ActorRef<DependencyWorker.Message> replyTo;
+        ActorRef<LargeMessageProxy.Message> replyToLMP;
+    }
+
+    /**
+     * Message to request column data for a specific attribute
+     */
+    @Getter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class RequestColumnMessage implements Message {
+        private static final long serialVersionUID = -3571780705578600223L;
         int attributeId;
         ActorRef<DependencyWorker.Message> replyTo;
         ActorRef<LargeMessageProxy.Message> replyToLMP;
@@ -216,11 +228,9 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     private ActorRef<DependencyMiner.Message> dependencyMiner;
     private int dataProviderId;
 
-    // Statistics for pruning
+    // For pruning
     private Map<Integer, ColumnStatistics> columnStatistics = new HashMap<>();
-
-    // Bloom filters for pruning
-    private Map<Integer, de.ddm.structures.BloomFilter> bloomFilters = new HashMap<>();
+    private Map<Integer, BloomFilter> bloomFilters = new HashMap<>();
 
     ////////////////////
     // Actor Behavior //
@@ -400,7 +410,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         this.transitionToValidationPhase();
 
         // Notify DependencyMiner that we're ready for validation
-        this.dependencyMiner.tell(new DependencyMiner.ValidationPhaseReadyMessage(this.dataProviderId));
+        this.dependencyMiner.tell(new DependencyMiner.DataProviderReadyForValidationMessage(this.dataProviderId));
         this.getContext().getLog().info("DataProvider-{} completed validation phase transition, sent ready message",
                 this.dataProviderId);
 
@@ -419,7 +429,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
     }
 
     private Behavior<Message> handle(RequestBloomFilterMessage message) {
-        de.ddm.structures.BloomFilter bloomFilter = this.bloomFilters.get(message.getAttributeId());
+        BloomFilter bloomFilter = this.bloomFilters.get(message.getAttributeId());
         if (bloomFilter == null) {
             this.getContext().getLog().warn("Bloom filter requested for unknown attribute {}",
                     message.getAttributeId());
@@ -586,7 +596,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         this.columns = null; // Free memory from loading phase
 
         long totalBloomFilterSize = this.bloomFilters.values().stream()
-                .mapToLong(de.ddm.structures.BloomFilter::getSizeInBytes)
+                .mapToLong(BloomFilter::getSizeInBytes)
                 .sum();
         this.getContext().getLog().info(
                 "DataProvider-{} completed transition: {} Bloom filters built, total size: {} KB",
@@ -633,7 +643,7 @@ public class DataProvider extends AbstractBehavior<DataProvider.Message> {
         boolean overloaded = this.usedMemoryPredicted >= this.availableMemory;
 
         // Answer with status
-        this.dependencyMiner.tell(new DependencyMiner.StatusMessage(this.dataProviderId, false, overloaded));
+        this.dependencyMiner.tell(new DependencyMiner.DataProviderStatusMessage(this.dataProviderId, false, overloaded));
 
         this.getContext().getLog().info("DataProvider-{} | Status: overloaded = {} ({} of {})", this.dataProviderId,
                 overloaded,
