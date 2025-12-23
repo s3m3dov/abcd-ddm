@@ -356,15 +356,11 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 				this.dependencyWorkerId, message.getAttributeId(),
 				message.getBloomFilter().getSizeInBytes());
 
-		// Check if we have both Bloom filters needed for pending directions
-		boolean needsLhsBF = (this.lhsToRhsState == DirectionState.BLOOM_PENDING ||
-				this.rhsToLhsState == DirectionState.BLOOM_PENDING);
-		boolean hasLhsBF = this.bloomFilterCache.containsKey(this.currentTask.getLhsAttributeId());
-		boolean hasRhsBF = this.bloomFilterCache.containsKey(this.currentTask.getRhsAttributeId());
-
-		if (needsLhsBF && hasLhsBF && hasRhsBF) {
-			// Both Bloom filters available, perform checks
-			checkWithBloomFilters();
+		// Only use RHS BloomFilter for LHS→RHS check
+		if (message.getAttributeId() == this.currentTask.getRhsAttributeId() &&
+				this.lhsToRhsState == DirectionState.BLOOM_PENDING) {
+			// RHS Bloom filter received, check LHS→RHS direction
+			checkLhsToRhsWithBloomFilter();
 		}
 
 		return this;
@@ -439,39 +435,31 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			checkTaskCompletion();
 		} else {
 			// At least one direction needs further validation
-			// Try Bloom filter check before data fetch
-			boolean needsBloomCheck = false;
+			// Use BloomFilter for LHS→RHS to avoid RHS data fetches
+			// For RHS→LHS, if statistics are inconclusive,
+            // skip BloomFilter and go directly to data validation
+			// because both LHS and RHS data will be needed anyway
 
-			// Update states to BLOOM_PENDING for inconclusive directions
 			if (this.lhsToRhsState == DirectionState.DATA_PENDING) {
+				// LHS→RHS needs validation - try BloomFilter first to avoid RHS fetch
 				this.lhsToRhsState = DirectionState.BLOOM_PENDING;
-				needsBloomCheck = true;
-			}
-			if (this.rhsToLhsState == DirectionState.DATA_PENDING) {
-				this.rhsToLhsState = DirectionState.BLOOM_PENDING;
-				needsBloomCheck = true;
-			}
 
-			if (needsBloomCheck) {
-				// Request Bloom filters (check cache first)
-				boolean requestedLhs = false;
-				boolean requestedRhs = false;
-
-				if (!this.bloomFilterCache.containsKey(this.currentTask.getLhsAttributeId())) {
-					this.localDataProvider.tell(new DataProvider.RequestBloomFilterMessage(
-							this.currentTask.getLhsAttributeId(), this.getContext().getSelf()));
-					requestedLhs = true;
-				}
+				// Request RHS BloomFilter only (check cache first)
 				if (!this.bloomFilterCache.containsKey(this.currentTask.getRhsAttributeId())) {
 					this.currentTask.getRhsDataProvider().tell(new DataProvider.RequestBloomFilterMessage(
 							this.currentTask.getRhsAttributeId(), this.getContext().getSelf()));
-					requestedRhs = true;
+				} else {
+					// RHS BloomFilter is cached, check immediately
+					checkLhsToRhsWithBloomFilter();
 				}
+			}
 
-				// If both are cached, check immediately
-				if (!requestedLhs && !requestedRhs) {
-					checkWithBloomFilters();
-				}
+			if (this.rhsToLhsState == DirectionState.DATA_PENDING) {
+				// RHS→LHS needs validation - skip BloomFilter, go directly to data validation
+				this.getContext().getLog().debug(
+						"DependencyWorker-{} RHS→LHS inconclusive - skipping BloomFilter, proceeding to data validation",
+						this.dependencyWorkerId);
+				this.getContext().getSelf().tell(new RhsToLhsCheckMessage());
 			}
 		}
 	}
@@ -594,43 +582,39 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	}
 
 	/**
-	 * Check both directions using Bloom filters
+	 * Check LHS→RHS direction using RHS Bloom filter to avoid RHS data fetch
 	 */
-	private void checkWithBloomFilters() {
-		de.ddm.structures.BloomFilter lhsBF = this.bloomFilterCache.get(this.currentTask.getLhsAttributeId());
+	private void checkLhsToRhsWithBloomFilter() {
+		if (this.lhsToRhsState != DirectionState.BLOOM_PENDING) {
+			return;
+		}
+
 		de.ddm.structures.BloomFilter rhsBF = this.bloomFilterCache.get(this.currentTask.getRhsAttributeId());
+		if (rhsBF == null) {
+			this.getContext().getLog().warn("RHS BloomFilter not available for attribute {}",
+					this.currentTask.getRhsAttributeId());
+			return;
+		}
 
 		this.getContext().getLog().debug(
-				"DependencyWorker-{} performing Bloom filter checks for task: {} ⊆ {}",
+				"DependencyWorker-{} checking LHS→RHS with RHS Bloom filter: {} ⊆ {}",
 				this.dependencyWorkerId,
 				this.currentTask.getLhsAttributeId(),
 				this.currentTask.getRhsAttributeId());
 
-		// Check LHS→RHS direction if needed
-		if (this.lhsToRhsState == DirectionState.BLOOM_PENDING) {
-			// Need LHS data to check against RHS Bloom filter
-			boolean needsLhsData = (this.lhsData == null ||
-					this.cachedLhsAttributeId != this.currentTask.getLhsAttributeId());
+		// Need LHS data to check against RHS Bloom filter
+		boolean needsLhsData = (this.lhsData == null ||
+				this.cachedLhsAttributeId != this.currentTask.getLhsAttributeId());
 
-			if (needsLhsData) {
-				// Request LHS data first, then check
-				this.localDataProvider.tell(new DataProvider.RequestColumnMessage(
-						this.currentTask.getLhsAttributeId(), this.getContext().getSelf(),
-						this.largeMessageProxy));
-				this.lhsDataFetched = true;
-			} else {
-				// Have LHS data, check now
-				checkDirectionWithBloomFilter(this.lhsData, rhsBF, true);
-			}
-		}
-
-		// Check RHS→LHS direction if needed
-		if (this.rhsToLhsState == DirectionState.BLOOM_PENDING) {
-			// Need RHS data to check against LHS Bloom filter
-			this.currentTask.getRhsDataProvider().tell(new DataProvider.RequestColumnMessage(
-					this.currentTask.getRhsAttributeId(), this.getContext().getSelf(),
+		if (needsLhsData) {
+			// Request LHS data first, then check
+			this.localDataProvider.tell(new DataProvider.RequestColumnMessage(
+					this.currentTask.getLhsAttributeId(), this.getContext().getSelf(),
 					this.largeMessageProxy));
-			this.rhsDataFetched = true;
+			this.lhsDataFetched = true;
+		} else {
+			// Have LHS data, check now against RHS BloomFilter
+			checkDirectionWithBloomFilter(this.lhsData, rhsBF, true);
 		}
 	}
 
@@ -850,7 +834,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			this.getContext().getLog().debug("DependencyWorker-{} received LHS data for attribute {}",
 					this.dependencyWorkerId, message.getAttributeId());
 
-			// If waiting for LHS data for Bloom filter check
+			// If waiting for LHS data for Bloom filter check (LHS→RHS direction only)
 			if (this.lhsToRhsState == DirectionState.BLOOM_PENDING) {
 				de.ddm.structures.BloomFilter rhsBF = this.bloomFilterCache.get(this.currentTask.getRhsAttributeId());
 				if (rhsBF != null) {
@@ -867,18 +851,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			this.getContext().getLog().debug("DependencyWorker-{} received RHS data for attribute {}",
 					this.dependencyWorkerId, message.getAttributeId());
 
-			// If waiting for RHS data for Bloom filter check
-			if (this.rhsToLhsState == DirectionState.BLOOM_PENDING) {
-				de.ddm.structures.BloomFilter lhsBF = this.bloomFilterCache.get(this.currentTask.getLhsAttributeId());
-				if (lhsBF != null) {
-					checkDirectionWithBloomFilter(this.rhsData, lhsBF, false);
-					// Only return early if BloomFilter definitively pruned (PRUNED_FALSE)
-					// If inconclusive (DATA_PENDING), continue to normal validation below
-					if (this.rhsToLhsState == DirectionState.PRUNED_FALSE) {
-						return this;
-					}
-				}
-			}
+			// RHS→LHS direction skips BloomFilter checks entirely
+			// Data will be validated directly when both LHS and RHS data are available
 		}
 
 		// Check which directions can now be validated (normal data validation)
