@@ -58,18 +58,6 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 		boolean rhsToLhsTransitive;
 	}
 
-	/**
-	 * Column data received from DataProvider
-	 */
-	@Getter
-	@NoArgsConstructor
-	@AllArgsConstructor
-	public static class ColumnDataMessage implements Message {
-		private static final long serialVersionUID = -1234567890123456782L;
-		int attributeId;
-		List<String> columnData;
-	}
-
 	@Getter
 	@NoArgsConstructor
 	@AllArgsConstructor
@@ -87,7 +75,19 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	public static class BloomFilterResponseMessage implements Message {
 		private static final long serialVersionUID = 998877665544332211L;
 		int attributeId;
-		de.ddm.structures.BloomFilter bloomFilter;
+		BloomFilter bloomFilter;
+	}
+
+    /**
+	 * Column data received from DataProvider
+	 */
+	@Getter
+	@NoArgsConstructor
+	@AllArgsConstructor
+	public static class ColumnDataMessage implements Message {
+		private static final long serialVersionUID = -1234567890123456782L;
+		int attributeId;
+		List<String> columnData;
 	}
 
 	/**
@@ -187,7 +187,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 	private boolean rhsDataFetched = false;
 
 	// Bloom filter cache (reused across tasks)
-	private Map<Integer, de.ddm.structures.BloomFilter> bloomFilterCache = new HashMap<>();
+	private Map<Integer, BloomFilter> bloomFilterCache = new HashMap<>();
 
 	////////////////////
 	// Actor Behavior //
@@ -590,7 +590,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			return;
 		}
 
-		de.ddm.structures.BloomFilter rhsBF = this.bloomFilterCache.get(this.currentTask.getRhsAttributeId());
+		BloomFilter rhsBF = this.bloomFilterCache.get(this.currentTask.getRhsAttributeId());
 		if (rhsBF == null) {
 			this.getContext().getLog().warn("RHS BloomFilter not available for attribute {}",
 					this.currentTask.getRhsAttributeId());
@@ -837,7 +837,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 
 			// If waiting for LHS data for Bloom filter check (LHS→RHS direction only)
 			if (this.lhsToRhsState == DirectionState.BLOOM_PENDING) {
-				de.ddm.structures.BloomFilter rhsBF = this.bloomFilterCache.get(this.currentTask.getRhsAttributeId());
+				BloomFilter rhsBF = this.bloomFilterCache.get(this.currentTask.getRhsAttributeId());
 				if (rhsBF != null) {
 					checkDirectionWithBloomFilter(this.lhsData, rhsBF, true);
 					// Only return early if BloomFilter definitively pruned (PRUNED_FALSE)
