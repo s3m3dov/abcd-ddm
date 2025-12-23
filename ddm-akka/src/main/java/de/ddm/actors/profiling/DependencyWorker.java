@@ -437,7 +437,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 			// At least one direction needs further validation
 			// Use BloomFilter for LHS→RHS to avoid RHS data fetches
 			// For RHS→LHS, if statistics are inconclusive,
-            // skip BloomFilter and go directly to data validation
+			// skip BloomFilter and go directly to data validation
 			// because both LHS and RHS data will be needed anyway
 
 			if (this.lhsToRhsState == DirectionState.DATA_PENDING) {
@@ -447,7 +447,8 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
 				// Request RHS BloomFilter only (check cache first)
 				if (!this.bloomFilterCache.containsKey(this.currentTask.getRhsAttributeId())) {
 					this.currentTask.getRhsDataProvider().tell(new DataProvider.RequestBloomFilterMessage(
-							this.currentTask.getRhsAttributeId(), this.getContext().getSelf()));
+							this.currentTask.getRhsAttributeId(), this.getContext().getSelf(),
+							this.largeMessageProxy));
 				} else {
 					// RHS BloomFilter is cached, check immediately
 					checkLhsToRhsWithBloomFilter();
