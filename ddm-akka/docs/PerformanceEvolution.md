@@ -1,4 +1,4 @@
-# Performance Evolution: Optimization Journey
+# Performance Evolution: Optimization Journey (On Modern Laptop)
 
 This document tracks the performance improvements achieved during the development of the `ddm-akka` project. It showcases how various pruning strategies and architectural optimizations reduced the discovery time for Inclusion Dependencies (INDs) by over **13x**.
 
