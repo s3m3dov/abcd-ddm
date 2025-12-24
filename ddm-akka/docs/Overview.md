@@ -13,6 +13,7 @@ This document provides a comprehensive overview of the `ddm-akka` project, cover
 3. [Important Logic & Decisions](#important-logic--decisions)
 4. [Completed Work & Features](#completed-work--features)
 5. [Summary of Performance Optimizations](#summary-of-performance-optimizations)
+6. [Performance Evolution History](PerformanceEvolution.md)
 
 ---
 
@@ -223,5 +224,8 @@ To minimize expensive data transfers and comparisons, the system employs several
 | **Sorted Subset Check** | High | Final validation layer, reducing comparison complexity from quadratic to linear. |
 | **LHS Caching** | Medium | Speeds up validation when multiple RHS attributes are checked against the same LHS. |
 | **Memory Monitoring** | High | System-wide protection that prevents JVM crashes on memory-constrained nodes. |
+
+> 💡 **Tip:**
+> For a detailed breakdown of how each optimization contributed to the project's performance gains over time, see the [Performance Evolution History](PerformanceEvolution.md).
 
 ---
