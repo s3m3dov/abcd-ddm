@@ -2,12 +2,13 @@
 
 Akka-based implementation for discovering unary Inclusion Dependencies (INDs) using actor-based distributed computing.
 
-> **Based on:** https://github.com/UMR-Big-Data-Analytics/ddm-akka  
+> **Based on:** <https://github.com/UMR-Big-Data-Analytics/ddm-akka>  
 > **Course:** Big Data Systems
 
 ## Table of Contents
 
 - [Requirements](#requirements)
+- [Documentation](#documentation)
 - [Getting Started](#getting-started)
 - [Run Configurations](#run-configurations)
   - [Demo Mode](#demo-mode)
@@ -17,6 +18,10 @@ Akka-based implementation for discovering unary Inclusion Dependencies (INDs) us
 - [Memory Configuration](#memory-configuration)
 - [Hints & Best Practices](#hints--best-practices)
 - [Troubleshooting](#troubleshooting)
+
+## Documentation
+
+For a deep dive into the project's architecture, message flows, and implementation details, please refer to the [Detailed Documentation](docs/Overview.md).
 
 ## Requirements
 
@@ -108,41 +113,47 @@ java -jar target/ddm-akka.jar master -es true
 > **Note:** The `-es true` flag is for demo purposes only. Press `Enter` to terminate. A working solution should end itself automatically once complete. Skip this flag (`-es false` or omit it) for production runs.
 
 ### Local Undistributed Run (Single Process)
+
 Run master and workers in a single process (not distributed):
 
 ```bash
 java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar master -w 4
 ```
 
-### Local Distributed Run (Single Machine, 1024 MB, 1 Additional Worker Node) 
+### Local Distributed Run (Single Machine, 1024 MB, 1 Additional Worker Node)
 
 Run master and multiple workers on the same machine using different terminal windows:
 
 **Terminal 1 - Master (2 local workers):**
+
 ```bash
 java -Xms1024m -Xmx1024m -jar target/ddm-akka.jar master -w 2
 ```
 
 **Terminal 2 - Worker 1 (default port 7879):**
+
 ```bash
 java -Xms1024m -Xmx1024m -jar target/ddm-akka.jar worker -w 4
 ```
 
-### Local Distributed Run (Single Machine, 512 MB, 5+ Worker Nodes) 
+### Local Distributed Run (Single Machine, 512 MB, 5+ Worker Nodes)
 
 Run master and multiple workers on the same machine using different terminal windows:
 
 **Terminal 1 - Master (no local workers):**
+
 ```bash
 java -Xms512m -Xmx512m -jar target/ddm-akka.jar master -w 0
 ```
 
 **Terminal 2 - Worker 1 (default port 7879):**
+
 ```bash
 java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 2
 ```
 
 **Terminal 3 - Worker 2 (custom port):**
+
 ```bash
 java -Xms512m -Xmx512m -jar target/ddm-akka.jar worker -w 2 -p 7880
 ```
@@ -156,24 +167,28 @@ change port number for each additional worker.
 For running across multiple physical machines or nodes:
 
 **Machine 1 - Master:**
+
 ```bash
 java -Xms1024m -Xmx1024m -jar target/ddm-akka.jar master -w 0 -h <master-ip>
 ```
 
 **Machine 2 - Worker:**
+
 ```bash
 java -Xms1024m -Xmx1024m -jar target/ddm-akka.jar worker -w 1 -mh <master-ip> -h <worker2-ip>
 ```
 
 **Machine 3 - Worker:**
+
 ```bash
 java -Xms1024m -Xmx1024m -jar target/ddm-akka.jar worker -w 1 -mh <master-ip> -h <worker3-ip>
 ```
 
 **Finding IP Addresses:**
+
 - Linux/Mac: `hostname -I` or `ifconfig`
 - Windows: `ipconfig`
-- Online: https://whatismyipaddress.com/
+- Online: <https://whatismyipaddress.com/>
 
 ### Command Line Parameters Summary
 
@@ -194,12 +209,14 @@ After running the implementation, validate your results:
 ```
 
 The script outputs:
+
 - **True:** Correctly found INDs
 - **False:** Incorrectly reported INDs (false positives)
 - **Missing:** INDs that should have been found but weren't (false negatives)
 - **Summary:** Statistics of all, found, false, and missing INDs
 
 **Example:**
+
 ```bash
 ./checkResultFiles.sh results/myresults.txt results/expected.txt
 ```
@@ -216,11 +233,13 @@ The script outputs:
 ### Recommended Configurations
 
 **Pi Cluster (strict constraints):**
+
 ```bash
 java -Xms512m -Xmx512m -jar target/ddm-akka.jar ...
 ```
 
 **Development Machine (more resources):**
+
 ```bash
 java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar ...
 ```
@@ -230,11 +249,13 @@ java -Xms2048m -Xmx2048m -jar target/ddm-akka.jar ...
 ## Hints & Best Practices
 
 1. **Help Text:** Run without arguments to see all parameter descriptions:
+
    ```bash
    java -jar target/ddm-akka.jar
    ```
 
 2. **Memory Testing:** Use restricted memory during development to ensure Pi cluster compatibility:
+
    ```bash
    java -Xms512m -Xmx512m -jar target/ddm-akka.jar ...
    ```
