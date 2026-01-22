@@ -98,7 +98,3 @@ This project is based on course materials from the "Distributed Data Management"
 Members:
 - Hikmat Samadov ([@s3m3dov](https://github.com/s3m3dov))
 - Sahil Hashimli ([@hashimlijr](https://github.com/hashimlijr))
-
-## License
-
-See individual LICENSE files in each subproject directory.
